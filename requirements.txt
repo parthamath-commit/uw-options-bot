@@ -1,0 +1,13 @@
+# UW Options Bot v1.0 — dependencies
+# pip install -r requirements.txt
+
+requests>=2.31.0
+python-dotenv>=1.0.0
+ib_async>=2.1.0
+openpyxl>=3.1.0
+python-telegram-bot>=20.0
+
+# ── Schwab fallback (optional) ───────────────────────────────────────────────
+# Uncomment when USE_SCHWAB_FALLBACK=true
+# schwab-py>=1.4.0
+selenium
