@@ -8,3 +8,6 @@ venv/
 .venv/
 secrets.py
 config_local.py
+schwab_token.json
+output/
+*.db
