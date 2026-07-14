@@ -185,7 +185,8 @@ CREATE INDEX IF NOT EXISTS idx_oi_ratio     ON oi_changes(vol_oi_ratio);
 CREATE TABLE IF NOT EXISTS darkpool_prints (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_run_id     INTEGER REFERENCES scan_runs(id),
-    captured_at     TEXT    NOT NULL,
+    captured_at     TEXT    NOT NULL,          -- when the bot stored it
+    executed_at     TEXT,                      -- when the trade printed (from API)
     symbol          TEXT    NOT NULL,
     price           REAL,
     size            INTEGER,
@@ -193,7 +194,7 @@ CREATE TABLE IF NOT EXISTS darkpool_prints (
     side            TEXT,                      -- above_mid | below_mid | mid
     sentiment       TEXT,                      -- bullish | bearish | neutral
     raw_json        TEXT,
-    UNIQUE (symbol, price, size, captured_at)
+    UNIQUE (symbol, executed_at, price, size)  -- dedup on trade identity, not scan time
 );
 
 CREATE INDEX IF NOT EXISTS idx_dp_symbol    ON darkpool_prints(symbol);

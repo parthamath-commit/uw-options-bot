@@ -265,10 +265,10 @@ def insert_darkpool_prints(
 
     sql = """
         INSERT OR IGNORE INTO darkpool_prints (
-            scan_run_id, captured_at,
+            scan_run_id, captured_at, executed_at,
             symbol, price, size, volume_usd,
             side, sentiment, raw_json
-        ) VALUES (?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
     """
     rows = []
     for t in trades:
@@ -277,7 +277,7 @@ def insert_darkpool_prints(
         vol_usd = round(price * size, 2)
         side = "above_mid" if price > mid else "below_mid" if price < mid else "mid"
         rows.append((
-            scan_run_id, _now(),
+            scan_run_id, _now(), t.get("executed_at"),
             symbol, price, size, vol_usd,
             side, overall_sentiment,
             json.dumps(t),
