@@ -566,8 +566,22 @@ class UWOptionsBot:
         oi_bonus     = get_oi_buildup_score(fsig.symbol, fsig.strike, fsig.right, fsig.expiry)
         iv_pct       = self.uw.get_iv_percentile(fsig.symbol)
         dp_trend     = get_dp_sentiment_trend(fsig.symbol, lookback_scans=5)
-        dp_now       = self.uw.get_darkpool_sentiment(fsig.symbol)
+        dp_trades    = self.uw.get_darkpool_trades_raw(fsig.symbol)
+        dp_now       = self.uw.darkpool_sentiment_from_trades(dp_trades)
         dp_sentiment = dp_trend if dp_trend != "neutral" else dp_now
+
+        # Persist raw dark pool prints (feeds get_dp_sentiment_trend and
+        # enables later "does darkpool confirm anything?" analysis)
+        try:
+            n_dp = insert_darkpool_prints(
+                scan_run_id=run_id, symbol=fsig.symbol,
+                trades=dp_trades, overall_sentiment=dp_now,
+            )
+            if n_dp:
+                log.debug("Darkpool prints stored: {} rows for {}".format(
+                    n_dp, fsig.symbol))
+        except Exception as _dp_err:
+            log.debug("Darkpool prints insert error: {}".format(_dp_err))
         gex_trend    = get_gex_trend_score(fsig.symbol)
 
         # Create FlowSignal for scorer compatibility

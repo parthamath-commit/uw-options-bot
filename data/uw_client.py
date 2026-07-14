@@ -534,11 +534,20 @@ class UWClient:
     # ── Dark Pool ─────────────────────────────────────────────────────────────
     def get_darkpool_sentiment(self, symbol):
         """
+        Convenience wrapper: fetch raw prints, compute sentiment.
+        Prefer get_darkpool_trades_raw() + darkpool_sentiment_from_trades()
+        when the caller also needs the raw prints (avoids a duplicate API call).
+        """
+        return self.darkpool_sentiment_from_trades(
+            self.get_darkpool_trades_raw(symbol)
+        )
+
+    def darkpool_sentiment_from_trades(self, trades):
+        """
+        Compute bullish/bearish/neutral from raw prints (no API call).
         Verified dark pool fields:
           price, size, volume, premium, trade_code, executed_at
         """
-        raw    = self._get("/api/darkpool/{}".format(symbol), {"limit": 50})
-        trades = self._as_list(raw)
         if not trades:
             return "neutral"
 
