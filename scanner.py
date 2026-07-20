@@ -467,7 +467,8 @@ class UWOptionsBot:
         exit_alerts = self._tracker.check_all_positions()
         if exit_alerts:
             log.info("{} exit alert(s) fired this cycle.".format(len(exit_alerts)))
-
+            
+        self.excel.export_xlsx()
         close_scan_run(run_id, len(unique_symbols), len(scored), n_alerts)
         log.info("── Done: {} signals, {} alerts, ~{} API calls ──\n".format(
             len(scored), n_alerts,
