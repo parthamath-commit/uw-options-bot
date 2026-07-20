@@ -1,7 +1,7 @@
 """
 persistence/excel.py
 ====================
-Signal logger — CSV hot path + on-demand styled xlsx export.
+Signal logger — per-day CSV hot path + on-demand styled xlsx export.
 
 WHY THE REWRITE (2026-07-20):
   The old logger did load_workbook() -> append -> save() for EVERY
@@ -11,19 +11,20 @@ WHY THE REWRITE (2026-07-20):
   inside openpyxl save/load). A process restart mid-save also corrupted
   the workbook repeatedly (signals_corrupt_*.xlsx).
 
-NEW DESIGN:
-  log_signal(sig)  -> appends ONE line to signals.csv (microseconds,
-                      append-only, corruption-proof). Same signature
-                      as before — scanner.py call sites unchanged.
-  export_xlsx()    -> rebuilds the styled signals.xlsx from the CSV.
-                      Call once per cycle (or on demand). Atomic
-                      write (tmp file + os.replace) so a kill mid-save
+DESIGN:
+  log_signal(sig)  -> appends ONE line to today's signals_YYYY-MM-DD.csv
+                      (microseconds, append-only, corruption-proof).
+                      Same signature as before — scanner.py unchanged.
+  export_xlsx()    -> rebuilds the styled signals.xlsx from TODAY's CSV.
+                      Atomic (tmp file + os.replace), so a kill mid-save
                       can never corrupt the visible file.
 
-ALSO FIXED:
-  Column misalignment — the old row order wrote `structure` under the
-  "Signal Type" header, shifting Signal Type/Rule Type/ML Validation/
-  Structure each one cell to the right. Row order now matches COLUMNS.
+ROTATION (added 2026-07-20):
+  CSV filename carries the date, so each trading day starts a fresh,
+  small file. The hot path and the export always touch only today's
+  rows — export stays ~1s indefinitely instead of growing unbounded.
+  History is preserved as dated CSVs (archive or delete at will);
+  cleanup_old_csvs() optionally trims files older than retention_days.
 
 Colour coding (unchanged):
   Green  = bullish (not blocked)
@@ -35,6 +36,7 @@ Colour coding (unchanged):
 import csv
 import logging
 import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from config import cfg
@@ -73,15 +75,20 @@ class ExcelLogger:
         10, 12, 15, 13,
     ]
 
-    # Column indexes used for row colouring on export (0-based, match COLUMNS)
     _IDX_INTENT  = COLUMNS.index("Intent")
     _IDX_BLOCKED = COLUMNS.index("GEX Blocked")
 
+    # Keep this many days of dated CSVs; older ones removed by cleanup_old_csvs().
+    RETENTION_DAYS = 90
+
     def __init__(self):
-        self.path = Path(cfg.EXCEL_PATH)                     # signals.xlsx (view file)
-        self.csv_path = self.path.with_suffix(".csv")        # signals.csv  (hot path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._dirty = False                                  # True when CSV has rows not yet exported
+        self.path = Path(cfg.EXCEL_PATH)                 # signals.xlsx (view file, always "today")
+        self.dir  = self.path.parent
+        self.stem = self.path.stem                        # e.g. "signals"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._dirty = False
+        self._csv_day = None                              # date the cached csv_path belongs to
+        self._csv_path = None
         if OPENPYXL_OK:
             self._hdr  = PatternFill("solid", fgColor="1F3864")
             self._bull = PatternFill("solid", fgColor="C6EFCE")
@@ -89,22 +96,36 @@ class ExcelLogger:
             self._blok = PatternFill("solid", fgColor="FFEB9C")
         self._ensure_csv()
 
-    # ── CSV hot path ──────────────────────────────────────────────────────────
+    # ── Per-day CSV path ───────────────────────────────────────────────────────
+    def _csv_for(self, d: date) -> Path:
+        return self.dir / "{}_{}.csv".format(self.stem, d.isoformat())
+
+    @property
+    def csv_path(self) -> Path:
+        """Today's CSV path. Rolls over automatically at midnight (local time)."""
+        today = date.today()
+        if self._csv_day != today:
+            self._csv_day = today
+            self._csv_path = self._csv_for(today)
+            self._dirty = False   # new day, fresh export state
+        return self._csv_path
+
     def _ensure_csv(self):
-        """Create the CSV with a header row if missing or empty."""
+        """Create today's CSV with a header row if missing or empty."""
         try:
-            if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
-                with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            p = self.csv_path
+            if not p.exists() or p.stat().st_size == 0:
+                with open(p, "w", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(self.COLUMNS)
-                log.info("Created: {}".format(self.csv_path))
+                log.info("Created: {}".format(p))
         except Exception as e:
             log.error("CSV init error: {}".format(e))
 
+    # ── Hot path ───────────────────────────────────────────────────────────────
     def log_signal(self, sig: ScoredSignal, _retry: bool = True):
         """
-        Append one signal to the CSV. Microseconds; never loads the xlsx.
-        Signature unchanged from the old implementation (scanner.py and
-        tests call log_signal(sig)).
+        Append one signal to today's CSV. Microseconds; never loads the xlsx.
+        Signature unchanged (scanner.py and tests call log_signal(sig)).
         """
         row = [
             sig.timestamp,
@@ -152,12 +173,10 @@ class ExcelLogger:
     # ── Styled xlsx export (call once per cycle / on demand) ─────────────────
     def export_xlsx(self, force: bool = False):
         """
-        Rebuild signals.xlsx from signals.csv with the original styling.
-        Costs one full workbook write — the same price the old code paid
-        PER SIGNAL — so calling this once per scan cycle is ~132x cheaper.
-        Atomic: writes to a temp file, then os.replace() over the target,
-        so a kill mid-save can never leave a corrupt signals.xlsx.
-        No-op unless new rows were logged since the last export (or force=True).
+        Rebuild signals.xlsx from TODAY's CSV with the original styling.
+        Atomic write; no-op unless new rows were logged (or force=True).
+        Because it reads only today's file, cost stays ~1s regardless of
+        how much history has accumulated in prior dated CSVs.
         """
         if not OPENPYXL_OK:
             return
@@ -173,7 +192,6 @@ class ExcelLogger:
             ws = wb.active
             ws.title = "Signals"
 
-            # Header
             ws.append(self.COLUMNS)
             for i, (cell, w) in enumerate(zip(ws[1], self.WIDTHS), 1):
                 cell.fill      = self._hdr
@@ -182,7 +200,6 @@ class ExcelLogger:
                 ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
             ws.freeze_panes = "A2"
 
-            # Data rows (skip CSV header)
             for row in rows[1:]:
                 ws.append(row)
                 blocked = len(row) > self._IDX_BLOCKED and row[self._IDX_BLOCKED] == "YES"
@@ -195,7 +212,6 @@ class ExcelLogger:
                 for cell in ws[ws.max_row]:
                     cell.fill = fill
 
-            # Atomic replace — never corrupts the visible file
             tmp = self.path.with_name(self.path.stem + ".tmp.xlsx")
             wb.save(tmp)
             os.replace(tmp, self.path)
@@ -203,3 +219,32 @@ class ExcelLogger:
             log.info("Exported {} signals -> {}".format(len(rows) - 1, self.path))
         except Exception as e:
             log.error("xlsx export error: {}".format(e))
+
+    # ── Retention ──────────────────────────────────────────────────────────────
+    def cleanup_old_csvs(self, retention_days: int = None):
+        """
+        Delete dated CSVs older than retention_days. Safe to call once per
+        day (e.g. at market close). Never touches today's file. Silently
+        skips files whose names don't parse as a date.
+        """
+        keep = retention_days if retention_days is not None else self.RETENTION_DAYS
+        cutoff = date.today() - timedelta(days=keep)
+        prefix = self.stem + "_"
+        removed = 0
+        try:
+            for p in self.dir.glob("{}*.csv".format(prefix)):
+                datepart = p.stem[len(prefix):]
+                try:
+                    d = datetime.strptime(datepart, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if d < cutoff:
+                    try:
+                        p.unlink()
+                        removed += 1
+                    except Exception as e:
+                        log.warning("Could not remove {}: {}".format(p, e))
+            if removed:
+                log.info("Cleaned {} CSV(s) older than {} days".format(removed, keep))
+        except Exception as e:
+            log.error("CSV cleanup error: {}".format(e))
