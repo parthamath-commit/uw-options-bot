@@ -86,9 +86,41 @@ def main():
 
     txns = all_txns
     print("\nTotal transactions across all accounts (180d):", len(txns), "\n")
+
+    # Positions check: if transactions are empty but positions exist,
+    # it's a transaction-scope problem, not an empty account.
+    print("=" * 60)
+    print("CURRENT POSITIONS CHECK (distinguishes scope vs empty acct)")
+    print("=" * 60)
+    for a in accounts:
+        h = a.get("hashValue")
+        try:
+            rp = client.get_account(h, fields=["positions"])
+            if rp.status_code == 200:
+                acct = rp.json().get("securitiesAccount", {})
+                positions = acct.get("positions", [])
+                bal = acct.get("currentBalances", {}) or {}
+                liq = bal.get("liquidationValue") or bal.get("cashBalance") or "?"
+                print("  account {}: {} open positions, value~{}".format(
+                    a.get("accountNumber", "?"), len(positions), liq))
+                for p in positions[:8]:
+                    instr = p.get("instrument", {})
+                    print("      {} {}  qty={}".format(
+                        instr.get("assetType", "?"),
+                        instr.get("symbol", "?"),
+                        p.get("longQuantity", 0) - p.get("shortQuantity", 0)))
+            else:
+                print("  account {}: positions HTTP {}".format(
+                    a.get("accountNumber", "?"), rp.status_code))
+        except Exception as e:
+            print("  positions error:", e)
+    print()
+
     if not txns:
-        print("Still empty. Either these accounts have no trade history,")
-        print("or trading happens in an account this token can't see.")
+        print("Transactions empty. If positions above are ALSO empty, the")
+        print("account has no activity. If positions show holdings but")
+        print("transactions are empty, the token lacks transaction-history")
+        print("scope -- re-auth needed with that permission.")
         return
 
     # show the variety of transaction types present
