@@ -57,37 +57,46 @@ def main():
     acct_hash = accounts[0].get("hashValue")
     print("Using first account hash:", acct_hash[:8], "...\n")
 
-    # Pull last 60 days of transactions
+    # Pull last 180 days of transactions, NO type filter (catch everything)
     end = datetime.now(timezone.utc)
-    start = end - timedelta(days=60)
+    start = end - timedelta(days=180)
 
-    # schwab-py: get_transactions(account_hash, start_date, end_date, transaction_types)
-    # transaction_types is an enum; TRADE covers executed buys/sells.
-    try:
-        TxType = client.Transactions.TransactionType
-        tx_types = [TxType.TRADE]
-    except Exception:
-        tx_types = None  # let API default
+    # Show ALL accounts, not just the first
+    print("All account hashes:")
+    for i, a in enumerate(accounts):
+        print("  [{}] number={}  hash={}...".format(
+            i, a.get("accountNumber", "?"), (a.get("hashValue") or "")[:8]))
+    print()
 
-    try:
-        if tx_types:
-            r = client.get_transactions(acct_hash, start_date=start,
-                                        end_date=end, transaction_types=tx_types)
+    all_txns = []
+    for a in accounts:
+        h = a.get("hashValue")
+        try:
+            r = client.get_transactions(h, start_date=start, end_date=end)
+        except TypeError:
+            r = client.get_transactions(h, start, end)
+        if r.status_code == 200:
+            txns_a = r.json()
+            print("  account {}: {} txns (180d, unfiltered)".format(
+                a.get("accountNumber", "?"), len(txns_a)))
+            all_txns.extend(txns_a)
         else:
-            r = client.get_transactions(acct_hash, start_date=start, end_date=end)
-    except TypeError:
-        # older/newer signature fallback
-        r = client.get_transactions(acct_hash, start, end)
+            print("  account {}: HTTP {} {}".format(
+                a.get("accountNumber", "?"), r.status_code, r.text[:120]))
 
-    if r.status_code != 200:
-        print("get_transactions failed:", r.status_code, r.text[:300])
-        return
-
-    txns = r.json()
-    print("Transactions returned (last 60d):", len(txns), "\n")
+    txns = all_txns
+    print("\nTotal transactions across all accounts (180d):", len(txns), "\n")
     if not txns:
-        print("No transactions in window. Try widening the date range.")
+        print("Still empty. Either these accounts have no trade history,")
+        print("or trading happens in an account this token can't see.")
         return
+
+    # show the variety of transaction types present
+    types_seen = {}
+    for t in txns:
+        ty = t.get("type") or t.get("transactionType") or "?"
+        types_seen[ty] = types_seen.get(ty, 0) + 1
+    print("Transaction types seen:", types_seen, "\n")
 
     # Show the structure of the first OPTION trade we can find
     def is_option(t):
