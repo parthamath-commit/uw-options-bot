@@ -54,7 +54,7 @@ HORIZONS = [1, 3, 5]
 
 # Target thresholds
 TARGET_GAIN_PCT  = float(os.getenv("TARGET_GAIN_PCT", "0.65"))   # +65% = win
-STOP_LOSS_PCT    = float(os.getenv("MAX_RISK_PCT", "0.01")) * 10  # -10% of premium = stop
+STOP_LOSS_PCT    = float(os.getenv("STOP_LOSS_PCT", "0.70"))     # -70% of premium = loss (matches live exit rule)
 
 
 def get_schwab_client():

@@ -181,8 +181,12 @@ def _fetch_screener(client, min_premium: float) -> list[FeedSignal]:
             volume   = int(c.get("volume") or 0)
             oi       = int(c.get("open_interest") or 0)
             iv       = client._f(c.get("implied_volatility") or c.get("iv"))
-            ask_pct  = client._f(c.get("ask_side_pct") or c.get("min_ask_perc") or 0)
-            ask_side = ask_pct >= 0.5
+            # UW screener returns per-trade volume split, not a pct field.
+            # (ask_side_perc_7_day exists but is a 7-day avg, not this trade.)
+            ask_vol  = client._f(c.get("ask_side_volume"))
+            bid_vol  = client._f(c.get("bid_side_volume"))
+            ask_side = ask_vol > bid_vol
+            ask_pct  = ask_vol / (ask_vol + bid_vol) if (ask_vol + bid_vol) > 0 else 0.0
 
             if not strike or not expiry:
                 log.debug("Screener: skipping {} -- no strike/expiry  sym={}".format(
