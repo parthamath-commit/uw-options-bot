@@ -58,12 +58,28 @@ STOP_LOSS_PCT    = float(os.getenv("STOP_LOSS_PCT", "0.70"))     # -70% of premi
 
 
 def get_schwab_client():
-    """Load Schwab client from saved token."""
+    """Load Schwab client from saved token.
+
+    The pip 'schwab' package is loaded under an alias to avoid colliding with
+    the local schwab_auth.py. It must be registered in sys.modules BEFORE
+    exec_module so the package's internal 'from . import auth' can resolve
+    its own parent (this is what the bare loader was missing).
+    """
     import importlib.util as ilu
+    import sys
+    ALIAS = "_schwab_real"
     spec = ilu.find_spec("schwab")
-    ldr  = ilu.spec_from_file_location("_schwab_real", spec.origin)
+    if spec is None or not spec.origin or "__init__" not in spec.origin:
+        raise ImportError("schwab-py package not found. Run: pip install schwab-py")
+    ldr  = ilu.spec_from_file_location(ALIAS, spec.origin,
+                                       submodule_search_locations=spec.submodule_search_locations)
     mod  = ilu.module_from_spec(ldr)
-    ldr.loader.exec_module(mod)
+    sys.modules[ALIAS] = mod          # register BEFORE exec so relative imports work
+    try:
+        ldr.loader.exec_module(mod)
+    except Exception:
+        sys.modules.pop(ALIAS, None)  # don't leave a half-initialized module behind
+        raise
     client = mod.auth.client_from_token_file(
         token_path=TOKEN_PATH,
         api_key=APP_KEY,
