@@ -71,18 +71,44 @@ def main():
     all_txns = []
     for a in accounts:
         h = a.get("hashValue")
+        r = None
+        # schwab-py requires transaction_types on this endpoint for many builds.
+        # Try, in order: typed TRADE enum, then RECEIVE_AND_DELIVER+TRADE, then bare.
+        attempts = []
         try:
-            r = client.get_transactions(h, start_date=start, end_date=end)
-        except TypeError:
-            r = client.get_transactions(h, start, end)
+            TT = client.Transactions.TransactionType
+            attempts.append({"start_date": start, "end_date": end,
+                             "transaction_types": [TT.TRADE]})
+            attempts.append({"start_date": start, "end_date": end,
+                             "transaction_types": list(TT)})
+        except Exception as e:
+            print("  (enum lookup failed: {})".format(e))
+        attempts.append({"start_date": start, "end_date": end})
+
+        for kw in attempts:
+            try:
+                r = client.get_transactions(h, **kw)
+            except TypeError:
+                try:
+                    r = client.get_transactions(h, start, end)
+                except Exception as e:
+                    print("  call error:", e); continue
+            except Exception as e:
+                print("  call error:", e); continue
+            if r is not None and r.status_code == 200 and r.json():
+                break  # got data, stop trying variants
+
+        if r is None:
+            print("  account {}: no response".format(a.get("accountNumber", "?")))
+            continue
         if r.status_code == 200:
             txns_a = r.json()
-            print("  account {}: {} txns (180d, unfiltered)".format(
+            print("  account {}: {} txns (180d)".format(
                 a.get("accountNumber", "?"), len(txns_a)))
             all_txns.extend(txns_a)
         else:
-            print("  account {}: HTTP {} {}".format(
-                a.get("accountNumber", "?"), r.status_code, r.text[:120]))
+            print("  account {}: HTTP {}  body: {}".format(
+                a.get("accountNumber", "?"), r.status_code, r.text[:200]))
 
     txns = all_txns
     print("\nTotal transactions across all accounts (180d):", len(txns), "\n")
@@ -95,7 +121,13 @@ def main():
     for a in accounts:
         h = a.get("hashValue")
         try:
-            rp = client.get_account(h, fields=["positions"])
+            # This client build enforces enums; use the typed Fields enum,
+            # falling back to no-fields (still returns positions on many builds).
+            try:
+                Fields = client.Account.Fields
+                rp = client.get_account(h, fields=[Fields.POSITIONS])
+            except Exception:
+                rp = client.get_account(h)
             if rp.status_code == 200:
                 acct = rp.json().get("securitiesAccount", {})
                 positions = acct.get("positions", [])
