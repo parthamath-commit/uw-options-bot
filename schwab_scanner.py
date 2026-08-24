@@ -364,7 +364,8 @@ def run_pattern_scan(client, symbols, timeframe):
 
 
 def run_sepa_scan(client, symbols):
-    """Minervini Trend Template (SEPA stage-2). avg vol > 500K gate applies."""
+    """Minervini Trend Template (SEPA stage-2). Only the 8 template criteria
+    decide pass/fail -- no volume or other filter is applied here."""
     # RS Rating is universe-relative, so compute it across all symbols first.
     print("Computing RS ratings across universe (needs 1 full pass)...")
     rs = compute_rs_ratings(client, symbols)
@@ -373,8 +374,6 @@ def run_sepa_scan(client, symbols):
     near_miss = []
     for s in symbols:
         candles = get_candles(client, s, "daily_long")
-        if avg_volume(candles) < MIN_AVG_VOL:
-            continue
         closes = [c["close"] for c in candles]
         highs = [c["high"] for c in candles]
         lows = [c["low"] for c in candles]
@@ -389,7 +388,7 @@ def run_sepa_scan(client, symbols):
             near_miss.append((s, rs.get(s), fails))
         time.sleep(0.3)
 
-    print("\n== Minervini Trend Template / SEPA (avg vol > 500K) ==")
+    print("\n== Minervini Trend Template / SEPA (8 criteria only) ==")
     if passed:
         print(f"\nPASSED ALL CRITERIA ({len(passed)}):")
         for s, r, crit in passed:
