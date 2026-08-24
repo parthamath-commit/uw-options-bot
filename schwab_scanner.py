@@ -28,7 +28,6 @@ Setup: no new dependencies -- uses schwab-py + numpy already in the bot venv.
 import os
 import sys
 import time
-import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -64,9 +63,8 @@ def load_universe():
 # ---------------------------------------------------------------- client
 def build_client():
     """
-    Build a schwab-py client from the bot's token file -- same approach as
-    broker/schwab.py. Loads the real schwab package via its __init__ path to
-    avoid the naming conflict with the bot's broker/schwab.py module.
+    Build a schwab-py client from the bot's token file. Standalone scanner has
+    no local schwab.py to conflict with, so a plain import works.
     """
     token_path = Path(SCHWAB_TOKEN_PATH)
     if not token_path.exists():
@@ -75,15 +73,13 @@ def build_client():
     if not SCHWAB_APP_KEY or not SCHWAB_APP_SECRET:
         sys.exit("SCHWAB_APP_KEY / SCHWAB_APP_SECRET not set in .env")
 
-    spec = importlib.util.find_spec("schwab")
-    if spec is None or not spec.origin:
+    try:
+        from schwab import auth as schwab_auth
+    except ImportError:
         sys.exit("schwab-py not installed in this environment. "
                  "Activate the bot venv first.")
-    loader = importlib.util.spec_from_file_location("_schwab_real", spec.origin)
-    schwab_mod = importlib.util.module_from_spec(loader)
-    loader.loader.exec_module(schwab_mod)
 
-    return schwab_mod.auth.client_from_token_file(
+    return schwab_auth.client_from_token_file(
         token_path=str(token_path),
         api_key=SCHWAB_APP_KEY,
         app_secret=SCHWAB_APP_SECRET,
