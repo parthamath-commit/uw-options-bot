@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass
 
-MIN_AVG_VOL = 500_000
+MIN_AVG_VOL = 1_000_000
 VOL_WINDOW = 30
 BB_WINDOW = 20
 BB_STD = 2
@@ -47,16 +47,54 @@ SCHWAB_APP_KEY    = os.getenv("SCHWAB_APP_KEY", "")
 SCHWAB_APP_SECRET = os.getenv("SCHWAB_APP_SECRET", "")
 SCHWAB_TOKEN_PATH = os.getenv("SCHWAB_TOKEN_PATH", "schwab_token.json")
 
+# email (SMTP) config -- read from .env, never hard-coded
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")
+EMAIL_TO = os.getenv("EMAIL_TO", "partha_pal_1999@yahoo.com")
+
+# Telegram config -- reuses the UW bot's existing bot token + chat id
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # ---------------------------------------------------------------- universe
 UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
             "AMD", "NFLX", "JPM", "BAC", "XOM", "CVX", "WMT", "KO"]
 
 
 def load_universe():
+    """Every run uses the full NASDAQ-listed + S&P 500 universe, rebuilt once
+    per day and reused for the rest of the day (day-cached in symbols.txt).
+
+    Order of preference:
+      1. build_universe.build() -- rebuilds if the cache isn't from today
+      2. an existing symbols.txt (if the builder can't fetch, e.g. offline)
+      3. SYMBOLS_FILE override, if explicitly set
+      4. the small built-in list (last-resort smoke test)
+    """
+    # explicit override wins, for ad-hoc testing
     path = os.environ.get("SYMBOLS_FILE")
     if path and os.path.exists(path):
         with open(path) as f:
             return [ln.strip().upper() for ln in f if ln.strip()]
+
+    try:
+        import build_universe
+        syms = build_universe.build(force=False)  # day-cached
+        if syms:
+            return syms
+    except Exception as e:
+        print(f"Universe build failed ({e}); falling back.")
+
+    # fallback: reuse a prior symbols.txt if one exists
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "symbols.txt")
+    if os.path.exists(fallback):
+        with open(fallback) as f:
+            return [ln.strip().upper() for ln in f if ln.strip()]
+
+    print("No universe available; using built-in 15-symbol smoke-test list.")
     return UNIVERSE
 
 
@@ -129,6 +167,15 @@ def get_candles(client, symbol, timeframe="daily"):
 def avg_volume(candles, window=VOL_WINDOW):
     vols = [c["volume"] for c in candles[-window:]]
     return np.mean(vols) if vols else 0
+
+
+def volume_shrinking_3d(candles):
+    """True if the last 3 daily volumes are non-increasing:
+    vol[-3] >= vol[-2] >= vol[-1]."""
+    if len(candles) < 3:
+        return False
+    v3, v2, v1 = candles[-3]["volume"], candles[-2]["volume"], candles[-1]["volume"]
+    return v3 >= v2 >= v1
 
 
 # ---------------------------------------------------------------- Bollinger
@@ -331,11 +378,14 @@ def compute_rs_ratings(client, symbols):
 
 
 # ---------------------------------------------------------------- scans
-def run_bb_scan(client, symbols):
+def scan_bb(client, symbols):
+    """BB breakouts. Gate: 30d avg vol > 1M AND last-3-day volume shrinking."""
     above, below = [], []
     for s in symbols:
         candles = get_candles(client, s, "daily")
         if avg_volume(candles) < MIN_AVG_VOL:
+            continue
+        if not volume_shrinking_3d(candles):
             continue
         sig = bb_signal([c["close"] for c in candles])
         if sig == "above_upper":
@@ -343,35 +393,50 @@ def run_bb_scan(client, symbols):
         elif sig == "below_lower":
             below.append(s)
         time.sleep(0.3)
-    print("\n== Bollinger Band breakouts (avg vol > 500K) ==")
-    print(f"Closed ABOVE upper band ({len(above)}): {', '.join(above) or '-'}")
-    print(f"Closed BELOW lower band ({len(below)}): {', '.join(below) or '-'}")
+    return {"above": above, "below": below}
 
 
-def run_pattern_scan(client, symbols, timeframe):
+def format_bb(res):
+    lines = ["== Bollinger Band breakouts "
+             "(30d avg vol > 1M, last-3-day volume shrinking) =="]
+    lines.append(f"Closed ABOVE upper band ({len(res['above'])}): "
+                 f"{', '.join(res['above']) or '-'}")
+    lines.append(f"Closed BELOW lower band ({len(res['below'])}): "
+                 f"{', '.join(res['below']) or '-'}")
+    return "\n".join(lines)
+
+
+def scan_patterns(client, symbols, timeframe):
+    """Candlestick patterns. Gate: 30d avg vol > 1M. Daily also requires the
+    last-3-day volume to be shrinking; weekly does not."""
     lists = {p: [] for p in PATTERNS}
     for s in symbols:
         candles = get_candles(client, s, timeframe)
         if avg_volume(candles) < MIN_AVG_VOL:
             continue
+        if timeframe == "daily" and not volume_shrinking_3d(candles):
+            continue
         for p in detect_patterns(candles):
             lists[p].append(s)
         time.sleep(0.3)
-    print(f"\n== {timeframe.capitalize()} candlestick patterns "
-          f"(30-day avg vol > 500K) ==")
+    return lists
+
+
+def format_patterns(lists, timeframe):
+    extra = ", last-3-day volume shrinking" if timeframe == "daily" else ""
+    lines = [f"== {timeframe.capitalize()} candlestick patterns "
+             f"(30d avg vol > 1M{extra}) =="]
     for p in PATTERNS:
-        print(f"{p:20s} ({len(lists[p])}): {', '.join(lists[p]) or '-'}")
+        lines.append(f"{p:20s} ({len(lists[p])}): {', '.join(lists[p]) or '-'}")
+    return "\n".join(lines)
 
 
-def run_sepa_scan(client, symbols):
-    """Minervini Trend Template (SEPA stage-2). Only the 8 template criteria
-    decide pass/fail -- no volume or other filter is applied here."""
-    # RS Rating is universe-relative, so compute it across all symbols first.
+def scan_sepa(client, symbols):
+    """Minervini Trend Template (SEPA). Only the 8 template criteria decide
+    pass/fail -- no volume or other filter."""
     print("Computing RS ratings across universe (needs 1 full pass)...")
     rs = compute_rs_ratings(client, symbols)
-
-    passed = []
-    near_miss = []
+    passed, near_miss = [], []
     for s in symbols:
         candles = get_candles(client, s, "daily_long")
         closes = [c["close"] for c in candles]
@@ -387,25 +452,141 @@ def run_sepa_scan(client, symbols):
                      if v is False and not k.startswith("_")]
             near_miss.append((s, rs.get(s), fails))
         time.sleep(0.3)
+    return {"passed": passed, "near_miss": near_miss}
 
-    print("\n== Minervini Trend Template / SEPA (8 criteria only) ==")
+
+def format_sepa(res, include_near_miss=True):
+    lines = ["== Minervini Trend Template / SEPA (8 criteria only) =="]
+    passed = res["passed"]
     if passed:
-        print(f"\nPASSED ALL CRITERIA ({len(passed)}):")
+        lines.append(f"\nPASSED ALL CRITERIA ({len(passed)}):")
         for s, r, crit in passed:
             tag = " [200-SMA up 5mo+]" if crit.get("_sma200_trending_up_5mo") else ""
-            print(f"  {s:6s}  RS={r if r is not None else 'n/a'}{tag}")
+            lines.append(f"  {s:6s}  RS={r if r is not None else 'n/a'}{tag}")
     else:
-        print("\nPASSED ALL CRITERIA (0): -")
+        lines.append("\nPASSED ALL CRITERIA (0): -")
+    if include_near_miss and res["near_miss"]:
+        lines.append(f"\nNEAR MISSES (failed 1+ criteria) ({len(res['near_miss'])}):")
+        for s, r, fails in res["near_miss"]:
+            lines.append(f"  {s:6s}  RS={r if r is not None else 'n/a'}  "
+                         f"failed: {', '.join(fails)}")
+    lines.append("\nNote: RS Rating is ranked within THIS universe only.")
+    return "\n".join(lines)
 
-    if near_miss:
-        print(f"\nNEAR MISSES (failed 1+ criteria) ({len(near_miss)}):")
-        for s, r, fails in near_miss:
-            print(f"  {s:6s}  RS={r if r is not None else 'n/a'}  "
-                  f"failed: {', '.join(fails)}")
 
-    print("\nNote: RS Rating here is ranked within THIS universe only. For a "
-          "true IBD-style rating, run against a broad universe (S&P 500+) or "
-          "supply an external RS source.")
+# thin wrappers that run + print, for the interactive menu
+def run_bb_scan(client, symbols):
+    print("\n" + format_bb(scan_bb(client, symbols)))
+
+
+def run_pattern_scan(client, symbols, timeframe):
+    print("\n" + format_patterns(scan_patterns(client, symbols, timeframe), timeframe))
+
+
+def run_sepa_scan(client, symbols):
+    print("\n" + format_sepa(scan_sepa(client, symbols)))
+
+
+def run_all(client, symbols, which=("1", "2", "3", "4")):
+    """Run the selected scans and return a combined text report."""
+    blocks = []
+    if "1" in which:
+        blocks.append(format_bb(scan_bb(client, symbols)))
+    if "2" in which:
+        blocks.append(format_patterns(scan_patterns(client, symbols, "daily"), "daily"))
+    if "3" in which:
+        blocks.append(format_patterns(scan_patterns(client, symbols, "weekly"), "weekly"))
+    if "4" in which:
+        blocks.append(format_sepa(scan_sepa(client, symbols)))
+    return "\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------- email
+def send_email(subject, body):
+    """Send a plain-text report via SMTP. Returns True on success."""
+    import smtplib
+    from email.mime.text import MIMEText
+
+    if not SMTP_USER or not SMTP_APP_PASSWORD:
+        print("SMTP_USER / SMTP_APP_PASSWORD not set in .env -- cannot email.")
+        return False
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = EMAIL_TO
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+            srv.starttls()
+            srv.login(SMTP_USER, SMTP_APP_PASSWORD)
+            srv.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+        print(f"Emailed report to {EMAIL_TO}")
+        return True
+    except Exception as e:
+        print(f"Email failed: {e}")
+        return False
+
+
+def send_telegram(text):
+    """Send a report to the UW bot's Telegram chat. Mirrors the bot's own
+    sender (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from .env). Splits into
+    <=4096-char chunks since Telegram rejects longer messages."""
+    import urllib.parse
+    import urllib.request
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in .env -- "
+              "cannot send Telegram.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    LIMIT = 4000  # under the 4096 cap, leaving headroom
+
+    # Split on line boundaries so no scan block is cut mid-line.
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > LIMIT:
+            if cur:
+                chunks.append(cur)
+            # a single over-long line: hard-split it
+            while len(line) > LIMIT:
+                chunks.append(line[:LIMIT])
+                line = line[LIMIT:]
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+
+    ok_all = True
+    for i, chunk in enumerate(chunks, 1):
+        tag = f"[{i}/{len(chunks)}]\n" if len(chunks) > 1 else ""
+        data = urllib.parse.urlencode(
+            {"chat_id": TELEGRAM_CHAT_ID, "text": tag + chunk}).encode()
+        try:
+            with urllib.request.urlopen(url, data=data, timeout=15) as resp:
+                if resp.status != 200:
+                    print(f"Telegram HTTP {resp.status}")
+                    ok_all = False
+        except Exception as e:
+            print(f"Telegram send failed: {e}")
+            ok_all = False
+        time.sleep(0.5)  # avoid Telegram flood limits between chunks
+    if ok_all:
+        print(f"Sent report to Telegram ({len(chunks)} message(s)).")
+    return ok_all
+
+
+def deliver(subject, report):
+    """Send the report by whichever channels are configured. Telegram is
+    preferred (reuses the bot's setup); email is used too if SMTP is set."""
+    sent = False
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        sent = send_telegram(f"{subject}\n\n{report}") or sent
+    if SMTP_USER and SMTP_APP_PASSWORD:
+        sent = send_email(subject, report) or sent
+    if not sent:
+        print("No delivery channel configured (set Telegram or SMTP in .env).")
+    return sent
 
 
 # ---------------------------------------------------------------- menu
@@ -415,6 +596,7 @@ MENU = """
   2. Daily candlestick patterns
   3. Weekly candlestick patterns
   4. Minervini Trend Template (SEPA)
+  5. Run ALL (1 + 2 + 3 + 4)
   0. Exit
 ==================================
 Choose: """
@@ -429,6 +611,8 @@ def run_choice(choice, client, symbols):
         run_pattern_scan(client, symbols, "weekly")
     elif choice == "4":
         run_sepa_scan(client, symbols)
+    elif choice == "5":
+        print("\n" + run_all(client, symbols, ("1", "2", "3", "4")))
     else:
         print("Invalid choice.")
 
@@ -438,8 +622,24 @@ def main():
     symbols = load_universe()
     print(f"Universe: {len(symbols)} symbols loaded.")
 
-    if len(sys.argv) > 1:
-        run_choice(sys.argv[1].strip(), client, symbols)
+    args = [a.strip() for a in sys.argv[1:]]
+
+    # Email modes for the scheduler (non-interactive):
+    #   --email-daily   -> scans 1,2,4 emailed
+    #   --email-weekly  -> scans 1,2,3,4 emailed
+    import datetime as _dt
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z")
+    if "--email-daily" in args or "--report-daily" in args:
+        report = run_all(client, symbols, ("1", "2", "4"))
+        deliver(f"[Scanner] Daily results 1,2,4 -- {stamp}", report)
+        return
+    if "--email-weekly" in args or "--report-weekly" in args:
+        report = run_all(client, symbols, ("1", "2", "3", "4"))
+        deliver(f"[Scanner] Friday results 1,2,3,4 -- {stamp}", report)
+        return
+
+    if args:
+        run_choice(args[0], client, symbols)
         return
 
     while True:
