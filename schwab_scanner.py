@@ -38,10 +38,14 @@ try:
 except ImportError:
     pass
 
-MIN_AVG_VOL = 1_000_000
-VOL_WINDOW = 30
-BB_WINDOW = 20
-BB_STD = 2
+MIN_AVG_VOL = float(os.getenv("MIN_AVG_VOL", "1000000"))
+VOL_WINDOW = int(os.getenv("VOL_WINDOW", "30"))
+BB_WINDOW = int(os.getenv("BB_WINDOW", "20"))
+BB_STD = float(os.getenv("BB_STD", "2"))
+
+# SMA20-proximity scan (options 6/7) -- configurable via .env
+SMA_PROX_PERIOD = int(os.getenv("SMA_PROX_PERIOD", "20"))
+SMA_PROX_BAND = float(os.getenv("SMA_PROX_BAND", "2"))
 
 SCHWAB_APP_KEY    = os.getenv("SCHWAB_APP_KEY", "")
 SCHWAB_APP_SECRET = os.getenv("SCHWAB_APP_SECRET", "")
@@ -162,6 +166,31 @@ def get_candles(client, symbol, timeframe="daily"):
     except Exception as e:
         print(f"  ! {symbol}: {e}")
         return []
+
+
+def get_live_prices(client, symbols, batch=200):
+    """Fetch live last prices for many symbols via schwab-py get_quotes
+    (batched). Returns {symbol: last_price}. Used by the intraday SMA20 scans
+    where 'current price' must be the live quote, not a completed candle."""
+    prices = {}
+    for i in range(0, len(symbols), batch):
+        chunk = symbols[i:i + batch]
+        try:
+            resp = client.get_quotes(chunk)
+            resp.raise_for_status()
+            data = resp.json()
+            for sym, q in data.items():
+                # schwab-py quote payloads nest the last price under "quote";
+                # fall back across the common field names.
+                qd = q.get("quote", q) if isinstance(q, dict) else {}
+                px = (qd.get("lastPrice") or qd.get("mark")
+                      or qd.get("closePrice"))
+                if px:
+                    prices[sym.upper()] = float(px)
+        except Exception as e:
+            print(f"  ! quotes batch {i}-{i+len(chunk)}: {e}")
+        time.sleep(0.3)
+    return prices
 
 
 def avg_volume(candles, window=VOL_WINDOW):
@@ -396,13 +425,23 @@ def scan_bb(client, symbols):
     return {"above": above, "below": below}
 
 
+def _vol_label():
+    v = MIN_AVG_VOL
+    return f"{v/1e6:g}M" if v >= 1e6 else f"{v/1e3:g}K"
+
+
 def format_bb(res):
-    lines = ["== Bollinger Band breakouts "
-             "(30d avg vol > 1M, last-3-day volume shrinking) =="]
-    lines.append(f"Closed ABOVE upper band ({len(res['above'])}): "
-                 f"{', '.join(res['above']) or '-'}")
-    lines.append(f"Closed BELOW lower band ({len(res['below'])}): "
-                 f"{', '.join(res['below']) or '-'}")
+    lines = [f"== Bollinger Band breakouts "
+             f"(BB {BB_WINDOW}/{BB_STD:g}sd, {VOL_WINDOW}d avg vol > "
+             f"{_vol_label()}, last-3-day volume shrinking) =="]
+    if res["above"]:
+        lines.append(f"Closed ABOVE upper band ({len(res['above'])}): "
+                     f"{', '.join(res['above'])}")
+    if res["below"]:
+        lines.append(f"Closed BELOW lower band ({len(res['below'])}): "
+                     f"{', '.join(res['below'])}")
+    if not res["above"] and not res["below"]:
+        lines.append("(no hits)")
     return "\n".join(lines)
 
 
@@ -425,9 +464,62 @@ def scan_patterns(client, symbols, timeframe):
 def format_patterns(lists, timeframe):
     extra = ", last-3-day volume shrinking" if timeframe == "daily" else ""
     lines = [f"== {timeframe.capitalize()} candlestick patterns "
-             f"(30d avg vol > 1M{extra}) =="]
+             f"({VOL_WINDOW}d avg vol > {_vol_label()}{extra}) =="]
+    any_hit = False
     for p in PATTERNS:
-        lines.append(f"{p:20s} ({len(lists[p])}): {', '.join(lists[p]) or '-'}")
+        if lists[p]:
+            any_hit = True
+            lines.append(f"{p} ({len(lists[p])}): {', '.join(lists[p])}")
+    if not any_hit:
+        lines.append("(no hits)")
+    return "\n".join(lines)
+
+
+def scan_sma20_proximity(client, symbols):
+    """Intraday SMA-proximity scans, run ~3:30pm ET (market open).
+      (a) approaching from below: sma - BAND < live_price <= sma,
+          AND the last 3 COMPLETED daily closes were all < sma.
+      (b) just above:            sma < live_price < sma + BAND.
+    SMA uses the last SMA_PROX_PERIOD completed daily closes; current price is
+    the live quote. Period and band are set by SMA_PROX_PERIOD / SMA_PROX_BAND
+    in .env (defaults 20 and 2)."""
+    period, band = SMA_PROX_PERIOD, SMA_PROX_BAND
+    live = get_live_prices(client, symbols)
+    below_approach, just_above = [], []
+    for s in symbols:
+        px = live.get(s)
+        if px is None:
+            continue
+        candles = get_candles(client, s, "daily")
+        closes = [c["close"] for c in candles]
+        if len(closes) < period:
+            continue
+        sma = float(np.mean(closes[-period:]))  # last N completed closes
+        # (a) approaching from below + last 3 completed closes below sma
+        last3_below = len(closes) >= 3 and all(c < sma for c in closes[-3:])
+        if last3_below and (sma - band) < px <= sma:
+            below_approach.append(f"{s}({px:.2f}/{sma:.2f})")
+        # (b) just above sma
+        if sma < px < (sma + band):
+            just_above.append(f"{s}({px:.2f}/{sma:.2f})")
+        time.sleep(0.3)
+    return {"below_approach": below_approach, "just_above": just_above}
+
+
+def format_sma20(res):
+    p, b = SMA_PROX_PERIOD, SMA_PROX_BAND
+    lines = [f"== SMA{p} proximity (intraday, live price / SMA{p}, "
+             f"band ${b:g}) =="]
+    if res["below_approach"]:
+        lines.append(f"(a) approaching from below, 3d<SMA{p} "
+                     f"({len(res['below_approach'])}): "
+                     f"{', '.join(res['below_approach'])}")
+    if res["just_above"]:
+        lines.append(f"(b) just above SMA{p} (<+${b:g}) "
+                     f"({len(res['just_above'])}): "
+                     f"{', '.join(res['just_above'])}")
+    if not res["below_approach"] and not res["just_above"]:
+        lines.append("(no hits)")
     return "\n".join(lines)
 
 
@@ -456,21 +548,20 @@ def scan_sepa(client, symbols):
 
 
 def format_sepa(res, include_near_miss=True):
-    lines = ["== Minervini Trend Template / SEPA (8 criteria only) =="]
+    lines = ["== Minervini Trend Template / SEPA =="]
     passed = res["passed"]
     if passed:
-        lines.append(f"\nPASSED ALL CRITERIA ({len(passed)}):")
+        lines.append(f"PASSED ({len(passed)}):")
         for s, r, crit in passed:
-            tag = " [200-SMA up 5mo+]" if crit.get("_sma200_trending_up_5mo") else ""
-            lines.append(f"  {s:6s}  RS={r if r is not None else 'n/a'}{tag}")
+            tag = " *" if crit.get("_sma200_trending_up_5mo") else ""
+            lines.append(f"  {s}  RS={r if r is not None else 'n/a'}{tag}")
     else:
-        lines.append("\nPASSED ALL CRITERIA (0): -")
+        lines.append("PASSED (0)")
     if include_near_miss and res["near_miss"]:
-        lines.append(f"\nNEAR MISSES (failed 1+ criteria) ({len(res['near_miss'])}):")
+        lines.append(f"\nNEAR MISSES ({len(res['near_miss'])}):")
         for s, r, fails in res["near_miss"]:
-            lines.append(f"  {s:6s}  RS={r if r is not None else 'n/a'}  "
+            lines.append(f"  {s}  RS={r if r is not None else 'n/a'}  "
                          f"failed: {', '.join(fails)}")
-    lines.append("\nNote: RS Rating is ranked within THIS universe only.")
     return "\n".join(lines)
 
 
@@ -497,7 +588,16 @@ def run_all(client, symbols, which=("1", "2", "3", "4")):
     if "3" in which:
         blocks.append(format_patterns(scan_patterns(client, symbols, "weekly"), "weekly"))
     if "4" in which:
-        blocks.append(format_sepa(scan_sepa(client, symbols)))
+        blocks.append(format_sepa(scan_sepa(client, symbols),
+                                  include_near_miss=False))
+    if "6" in which or "7" in which:
+        # both SMA20 sub-scans share one live-quote pass
+        res = scan_sma20_proximity(client, symbols)
+        if "7" in which and "6" not in which:
+            res = {"below_approach": [], "just_above": res["just_above"]}
+        if "6" in which and "7" not in which:
+            res = {"below_approach": res["below_approach"], "just_above": []}
+        blocks.append(format_sma20(res))
     return "\n\n".join(blocks)
 
 
@@ -597,6 +697,8 @@ MENU = """
   3. Weekly candlestick patterns
   4. Minervini Trend Template (SEPA)
   5. Run ALL (1 + 2 + 3 + 4)
+  6. SMA20 approaching from below (intraday)
+  7. SMA20 just above (intraday)
   0. Exit
 ==================================
 Choose: """
@@ -613,6 +715,8 @@ def run_choice(choice, client, symbols):
         run_sepa_scan(client, symbols)
     elif choice == "5":
         print("\n" + run_all(client, symbols, ("1", "2", "3", "4")))
+    elif choice in ("6", "7"):
+        print("\n" + run_all(client, symbols, (choice,)))
     else:
         print("Invalid choice.")
 
@@ -624,11 +728,16 @@ def main():
 
     args = [a.strip() for a in sys.argv[1:]]
 
-    # Email modes for the scheduler (non-interactive):
-    #   --email-daily   -> scans 1,2,4 emailed
-    #   --email-weekly  -> scans 1,2,3,4 emailed
+    # Non-interactive scheduler modes:
+    #   --report-daily   -> scans 1,2,4      (Mon-Thu after close)
+    #   --report-weekly  -> scans 1,2,3,4    (Friday after close)
+    #   --report-330     -> scans 6,7        (weekdays 3:30pm ET, intraday)
     import datetime as _dt
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z")
+    if "--report-330" in args:
+        report = run_all(client, symbols, ("6", "7"))
+        deliver(f"[Scanner] 3:30pm SMA20 proximity -- {stamp}", report)
+        return
     if "--email-daily" in args or "--report-daily" in args:
         report = run_all(client, symbols, ("1", "2", "4"))
         deliver(f"[Scanner] Daily results 1,2,4 -- {stamp}", report)

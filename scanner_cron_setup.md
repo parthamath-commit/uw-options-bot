@@ -44,6 +44,8 @@ Edit with: crontab -e   then add:
 
     # Saturday 08:00 ET -> rebuild the ticker universe for the coming week
     0 8 * * 6     cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
+    # Mon-Fri 15:30 ET -> intraday SMA20 proximity (scans 6,7)
+    30 15 * * 1-5 /home/ubuntu/uw-options-bot/run_email.sh --report-330
     # Mon-Thu 18:00 ET -> daily report (scans 1,2,4)
     0 18 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
     # Friday 18:00 ET -> weekly report (scans 1,2,3,4)
@@ -51,6 +53,7 @@ Edit with: crontab -e   then add:
 
 ## Crontab (if VM stays on UTC) -- EDT (summer). Add 1 hour in winter (EST).
     0 12 * * 6    cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
+    30 19 * * 1-5 /home/ubuntu/uw-options-bot/run_email.sh --report-330
     0 22 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
     0 22 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --report-weekly
 
@@ -62,6 +65,18 @@ No new credentials needed. The scanner reads the SAME keys the bot uses:
     TELEGRAM_CHAT_ID=...     (already in .env)
 Reports go to the same chat as your bot alerts. Long reports are auto-split
 into <=4000-char chunks. This is the default -- nothing to configure.
+
+### Bollinger Band + volume tuning (optional)
+Defaults shown; set in .env to change. Affects scans 1/2/3:
+    BB_WINDOW=20           # Bollinger SMA period
+    BB_STD=2               # standard deviations for the bands
+    MIN_AVG_VOL=1000000    # min N-day average volume gate
+    VOL_WINDOW=30          # lookback for the avg-volume gate
+
+### SMA-proximity scan tuning (optional)
+Options 6/7 use these; defaults shown. Set in .env to change:
+    SMA_PROX_PERIOD=20     # SMA lookback in days
+    SMA_PROX_BAND=2        # dollar band above/below the SMA
 
 ### Email (optional -- only if you ALSO want email)
 Add these to .env; if present, reports are emailed in addition to Telegram:
