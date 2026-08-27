@@ -64,8 +64,8 @@ UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
 
 
 def load_universe():
-    """Every run uses the full NASDAQ-listed + S&P 500 universe, rebuilt once
-    per day and reused for the rest of the day (day-cached in symbols.txt).
+    """Every run uses the full NASDAQ-listed + S&P 500 universe. The list is
+    rebuilt weekly by a Saturday cron; scan runs reuse the existing symbols.txt.
 
     Order of preference:
       1. build_universe.build() -- rebuilds if the cache isn't from today
@@ -81,7 +81,7 @@ def load_universe():
 
     try:
         import build_universe
-        syms = build_universe.build(force=False)  # day-cached
+        syms = build_universe.build(force=False)  # reuse; Saturday cron rebuilds
         if syms:
             return syms
     except Exception as e:

@@ -2,9 +2,9 @@
 
 ## Universe
 Every run scans ALL NASDAQ-listed common stocks + S&P 500 constituents.
-The scanner rebuilds this list once per day (cached in symbols.txt) and reuses
-it for the rest of the day, so scheduled runs always use a current universe
-with no manual step. Force a rebuild anytime with: python3 build_universe.py --force
+The list is rebuilt every Saturday by a dedicated cron job (build_universe.py
+--force). Scan runs in between simply reuse symbols.txt, so the universe is
+stable Sat-to-Sat and mid-week scans don't re-fetch. Force a rebuild anytime with: python3 build_universe.py --force
 
 ## What runs
 - Mon-Thu, after US close: scans 1, 2, 4  -> email
@@ -32,7 +32,7 @@ venv, points at the full universe, and runs the scanner. Save as run_email.sh:
     set -euo pipefail
     cd /home/ubuntu/uw-options-bot
     source venv/bin/activate
-    # Universe auto-rebuilds daily (NASDAQ-listed + S&P 500). No export needed.
+    # Universe auto-rebuilds weekly (NASDAQ-listed + S&P 500). No export needed.
     python3 schwab_scanner.py "$1" >> /home/ubuntu/uw-options-bot/scanner_email.log 2>&1
 
 Make it executable:
@@ -42,14 +42,17 @@ Make it executable:
 ## Crontab (America/New_York)
 Edit with: crontab -e   then add:
 
+    # Saturday 08:00 ET -> rebuild the ticker universe for the coming week
+    0 8 * * 6     cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
     # Mon-Thu 18:00 ET -> daily report (scans 1,2,4)
-    0 18 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --email-daily
+    0 18 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
     # Friday 18:00 ET -> weekly report (scans 1,2,3,4)
-    0 18 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --email-weekly
+    0 18 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --report-weekly
 
 ## Crontab (if VM stays on UTC) -- EDT (summer). Add 1 hour in winter (EST).
-    0 22 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --email-daily
-    0 22 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --email-weekly
+    0 12 * * 6    cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
+    0 22 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
+    0 22 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --report-weekly
 
 ## Delivery channel
 

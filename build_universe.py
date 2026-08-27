@@ -16,8 +16,9 @@ Sources (public, no auth):
 
 Keeps COMMON STOCK ONLY (drops ETFs, test issues, warrants/units/rights/pfd).
 
-Day-cache: if symbols.txt exists and was modified today, build_universe() reuses
-it and does NOT re-fetch. Force a rebuild with:  python3 build_universe.py --force
+Rebuild policy: a normal scan reuses the existing symbols.txt and never
+re-fetches. The list is rebuilt once a week by a Saturday cron that runs this
+with --force. Force a rebuild manually anytime with:  python3 build_universe.py --force
 
 Output: symbols.txt (one ticker per line), deduped & sorted.
 """
@@ -122,14 +123,21 @@ def normalize_sp_symbol(s):
 
 
 def build(force=False):
-    """Build symbols.txt. Returns the list of tickers. Day-cached unless force."""
+    """Build symbols.txt and return the tickers.
+
+    Rebuild policy: rebuilds ONLY when forced (the weekly Saturday cron passes
+    --force). On a normal scan run (force=False) it reuses the existing
+    symbols.txt and never re-fetches -- so mid-week scans are fast and the
+    universe is stable between Saturday rebuilds. If no file exists yet, it
+    builds once regardless so the first run isn't empty."""
     if not force and os.path.exists(OUT_PATH):
-        mtime = datetime.date.fromtimestamp(os.path.getmtime(OUT_PATH))
-        if mtime == datetime.date.today():
-            with open(OUT_PATH) as f:
-                cached = [ln.strip() for ln in f if ln.strip()]
-            print(f"Universe cached today: {len(cached)} tickers "
-                  f"(use --force to rebuild).")
+        with open(OUT_PATH) as f:
+            cached = [ln.strip() for ln in f if ln.strip()]
+        if cached:
+            age_days = (datetime.date.today()
+                        - datetime.date.fromtimestamp(os.path.getmtime(OUT_PATH))).days
+            print(f"Universe: reusing symbols.txt ({len(cached)} tickers, "
+                  f"{age_days}d old; rebuilt weekly by Saturday cron).")
             return cached
 
     print("Fetching NASDAQ-listed common stocks...")
