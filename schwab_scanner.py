@@ -42,6 +42,11 @@ MIN_AVG_VOL = float(os.getenv("MIN_AVG_VOL", "1000000"))
 VOL_WINDOW = int(os.getenv("VOL_WINDOW", "30"))
 BB_WINDOW = int(os.getenv("BB_WINDOW", "20"))
 BB_STD = float(os.getenv("BB_STD", "2"))
+BB_OFFSET = float(os.getenv("BB_OFFSET", "2"))
+RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
+RSI_OVERBOUGHT = float(os.getenv("RSI_OVERBOUGHT", "70"))
+RSI_OVERSOLD = float(os.getenv("RSI_OVERSOLD", "30"))
+MIN_PRICE = float(os.getenv("MIN_PRICE", "30"))
 
 # SMA20-proximity scan (options 6/7) -- configurable via .env
 SMA_PROX_PERIOD = int(os.getenv("SMA_PROX_PERIOD", "20"))
@@ -220,6 +225,37 @@ def bb_signal(closes, window=BB_WINDOW, num_std=BB_STD):
     if last < lower:
         return "below_lower"
     return "inside"
+
+
+def bb_bands(closes, window=BB_WINDOW, num_std=BB_STD):
+    """Return (upper, middle, lower) Bollinger bands from the last `window`
+    closes, or None if not enough history."""
+    if len(closes) < window:
+        return None
+    arr = np.array(closes[-window:])
+    sma, sd = arr.mean(), arr.std(ddof=0)
+    return sma + num_std * sd, sma, sma - num_std * sd
+
+
+def rsi(closes, period=RSI_PERIOD):
+    """Wilder's RSI over the last `period` on the close series. Returns the
+    latest RSI value (0-100), or None if not enough data."""
+    if len(closes) < period + 1:
+        return None
+    arr = np.asarray(closes, dtype=float)
+    deltas = np.diff(arr)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    # seed with simple average of first `period`, then Wilder-smooth
+    avg_gain = gains[:period].mean()
+    avg_loss = losses[:period].mean()
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
 
 # ---------------------------------------------------------------- patterns
@@ -407,22 +443,51 @@ def compute_rs_ratings(client, symbols):
 
 
 # ---------------------------------------------------------------- scans
-def scan_bb(client, symbols):
-    """BB breakouts. Gate: 30d avg vol > 1M AND last-3-day volume shrinking."""
-    above, below = [], []
+def _price_ok(symbol, candles, prices):
+    """Min-price gate: use the live quote if we have one, else the last close.
+    Returns True if that price >= MIN_PRICE (or if no price is available at
+    all, in which case we don't drop it on price)."""
+    px = None
+    if prices:
+        px = prices.get(symbol)
+    if px is None and candles:
+        px = candles[-1].get("close")
+    if px is None:
+        return True  # can't determine price -> don't gate it out
+    return px >= MIN_PRICE
+
+
+def scan_bb(client, symbols, prices=None):
+    """BB screener. Gates: price >= MIN_PRICE, VOL_WINDOW avg vol > MIN_AVG_VOL.
+    Two setups on the latest daily candle (offset = BB_OFFSET):
+      overbought: daily HIGH >= upper band - offset AND RSI >= RSI_OVERBOUGHT
+      oversold:   daily LOW  <= lower band + offset AND RSI <= RSI_OVERSOLD
+    """
+    overbought, oversold = [], []
     for s in symbols:
         candles = get_candles(client, s, "daily")
+        if not _price_ok(s, candles, prices):
+            continue
         if avg_volume(candles) < MIN_AVG_VOL:
             continue
-        if not volume_shrinking_3d(candles):
+        closes = [c["close"] for c in candles]
+        bands = bb_bands(closes)
+        if bands is None:
             continue
-        sig = bb_signal([c["close"] for c in candles])
-        if sig == "above_upper":
-            above.append(s)
-        elif sig == "below_lower":
-            below.append(s)
+        upper, mid, lower = bands
+        r = rsi(closes)
+        if r is None:
+            continue
+        last = candles[-1]
+        hi, lo = last["high"], last["low"]
+        # overbought setup: high pressing the upper band + RSI overbought
+        if hi >= (upper - BB_OFFSET) and r >= RSI_OVERBOUGHT:
+            overbought.append(f"{s}(RSI{r:.0f})")
+        # oversold setup: low pressing the lower band + RSI oversold
+        if lo <= (lower + BB_OFFSET) and r <= RSI_OVERSOLD:
+            oversold.append(f"{s}(RSI{r:.0f})")
         time.sleep(0.3)
-    return {"above": above, "below": below}
+    return {"overbought": overbought, "oversold": oversold}
 
 
 def _vol_label():
@@ -431,26 +496,32 @@ def _vol_label():
 
 
 def format_bb(res):
-    lines = [f"== Bollinger Band breakouts "
-             f"(BB {BB_WINDOW}/{BB_STD:g}sd, {VOL_WINDOW}d avg vol > "
-             f"{_vol_label()}, last-3-day volume shrinking) =="]
-    if res["above"]:
-        lines.append(f"Closed ABOVE upper band ({len(res['above'])}): "
-                     f"{', '.join(res['above'])}")
-    if res["below"]:
-        lines.append(f"Closed BELOW lower band ({len(res['below'])}): "
-                     f"{', '.join(res['below'])}")
-    if not res["above"] and not res["below"]:
+    lines = [f"== BB band-touch + RSI "
+             f"(BB {BB_WINDOW}/{BB_STD:g}sd, offset ${BB_OFFSET:g}, "
+             f"RSI{RSI_PERIOD} OB>={RSI_OVERBOUGHT:g}/OS<={RSI_OVERSOLD:g}, "
+             f"{VOL_WINDOW}d avg vol > {_vol_label()}) =="]
+    if res["overbought"]:
+        lines.append(f"Overbought (high near upper band) "
+                     f"({len(res['overbought'])}): "
+                     f"{', '.join(res['overbought'])}")
+    if res["oversold"]:
+        lines.append(f"Oversold (low near lower band) "
+                     f"({len(res['oversold'])}): "
+                     f"{', '.join(res['oversold'])}")
+    if not res["overbought"] and not res["oversold"]:
         lines.append("(no hits)")
     return "\n".join(lines)
 
 
-def scan_patterns(client, symbols, timeframe):
-    """Candlestick patterns. Gate: 30d avg vol > 1M. Daily also requires the
-    last-3-day volume to be shrinking; weekly does not."""
+def scan_patterns(client, symbols, timeframe, prices=None):
+    """Candlestick patterns. Gates: price >= MIN_PRICE, Nd avg vol >
+    MIN_AVG_VOL. Daily also requires last-3-day volume non-increasing;
+    weekly does not."""
     lists = {p: [] for p in PATTERNS}
     for s in symbols:
         candles = get_candles(client, s, timeframe)
+        if not _price_ok(s, candles, prices):
+            continue
         if avg_volume(candles) < MIN_AVG_VOL:
             continue
         if timeframe == "daily" and not volume_shrinking_3d(candles):
@@ -489,6 +560,8 @@ def scan_sma20_proximity(client, symbols):
     for s in symbols:
         px = live.get(s)
         if px is None:
+            continue
+        if px < MIN_PRICE:            # min-price gate (live quote)
             continue
         candles = get_candles(client, s, "daily")
         closes = [c["close"] for c in candles]
@@ -581,17 +654,24 @@ def run_sepa_scan(client, symbols):
 def run_all(client, symbols, which=("1", "2", "3", "4")):
     """Run the selected scans and return a combined text report."""
     blocks = []
+    # Scans 1/2/3 apply the min-price gate (live quote where available, else
+    # last close). Fetch live prices once and share across them.
+    prices = None
+    if any(x in which for x in ("1", "2", "3")):
+        prices = get_live_prices(client, symbols)
     if "1" in which:
-        blocks.append(format_bb(scan_bb(client, symbols)))
+        blocks.append(format_bb(scan_bb(client, symbols, prices)))
     if "2" in which:
-        blocks.append(format_patterns(scan_patterns(client, symbols, "daily"), "daily"))
+        blocks.append(format_patterns(
+            scan_patterns(client, symbols, "daily", prices), "daily"))
     if "3" in which:
-        blocks.append(format_patterns(scan_patterns(client, symbols, "weekly"), "weekly"))
+        blocks.append(format_patterns(
+            scan_patterns(client, symbols, "weekly", prices), "weekly"))
     if "4" in which:
         blocks.append(format_sepa(scan_sepa(client, symbols),
                                   include_near_miss=False))
     if "6" in which or "7" in which:
-        # both SMA20 sub-scans share one live-quote pass
+        # both SMA sub-scans share one live-quote pass (gate applied inside)
         res = scan_sma20_proximity(client, symbols)
         if "7" in which and "6" not in which:
             res = {"below_approach": [], "just_above": res["just_above"]}

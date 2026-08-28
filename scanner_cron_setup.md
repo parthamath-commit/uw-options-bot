@@ -70,8 +70,13 @@ into <=4000-char chunks. This is the default -- nothing to configure.
 Defaults shown; set in .env to change. Affects scans 1/2/3:
     BB_WINDOW=20           # Bollinger SMA period
     BB_STD=2               # standard deviations for the bands
+    BB_OFFSET=2            # $ proximity of daily high/low to a band (scan 1)
+    RSI_PERIOD=14          # RSI lookback (scan 1)
+    RSI_OVERBOUGHT=70      # RSI overbought level (scan 1)
+    RSI_OVERSOLD=30        # RSI oversold level (scan 1)
     MIN_AVG_VOL=1000000    # min N-day average volume gate
     VOL_WINDOW=30          # lookback for the avg-volume gate
+    MIN_PRICE=30           # min price ($); applies to scans 1,2,3,6,7 (not SEPA)
 
 ### SMA-proximity scan tuning (optional)
 Options 6/7 use these; defaults shown. Set in .env to change:
