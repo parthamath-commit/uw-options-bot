@@ -74,7 +74,8 @@ Defaults shown; set in .env to change. Affects scans 1/2/3:
     RSI_PERIOD=14          # RSI lookback (scan 1)
     RSI_OVERBOUGHT=70      # RSI overbought level (scan 1)
     RSI_OVERSOLD=30        # RSI oversold level (scan 1)
-    MIN_AVG_VOL=1000000    # min N-day average volume gate
+    MIN_AVG_VOL=1000000    # min avg volume gate for daily scans (1,2)
+    MIN_AVG_VOL_WEEKLY=5000000  # min avg volume gate for weekly scan (3)
     VOL_WINDOW=30          # lookback for the avg-volume gate
     MIN_PRICE=30           # min price ($); applies to scans 1,2,3,6,7 (not SEPA)
 

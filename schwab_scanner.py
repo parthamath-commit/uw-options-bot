@@ -39,6 +39,7 @@ except ImportError:
     pass
 
 MIN_AVG_VOL = float(os.getenv("MIN_AVG_VOL", "1000000"))
+MIN_AVG_VOL_WEEKLY = float(os.getenv("MIN_AVG_VOL_WEEKLY", "5000000"))
 VOL_WINDOW = int(os.getenv("VOL_WINDOW", "30"))
 BB_WINDOW = int(os.getenv("BB_WINDOW", "20"))
 BB_STD = float(os.getenv("BB_STD", "2"))
@@ -457,18 +458,21 @@ def _price_ok(symbol, candles, prices):
     return px >= MIN_PRICE
 
 
-def scan_bb(client, symbols, prices=None):
-    """BB screener. Gates: price >= MIN_PRICE, VOL_WINDOW avg vol > MIN_AVG_VOL.
-    Two setups on the latest daily candle (offset = BB_OFFSET):
-      overbought: daily HIGH >= upper band - offset AND RSI >= RSI_OVERBOUGHT
-      oversold:   daily LOW  <= lower band + offset AND RSI <= RSI_OVERSOLD
+def scan_bb(client, symbols, prices=None, timeframe="daily", min_vol=None):
+    """BB band-touch + RSI screener. Gates: price >= MIN_PRICE, VOL_WINDOW
+    avg vol > min_vol (defaults to MIN_AVG_VOL). Two setups on the latest
+    candle of `timeframe` (offset = BB_OFFSET):
+      overbought: HIGH >= upper band - offset AND RSI >= RSI_OVERBOUGHT
+      oversold:   LOW  <= lower band + offset AND RSI <= RSI_OVERSOLD
     """
+    if min_vol is None:
+        min_vol = MIN_AVG_VOL
     overbought, oversold = [], []
     for s in symbols:
-        candles = get_candles(client, s, "daily")
+        candles = get_candles(client, s, timeframe)
         if not _price_ok(s, candles, prices):
             continue
-        if avg_volume(candles) < MIN_AVG_VOL:
+        if avg_volume(candles) < min_vol:
             continue
         closes = [c["close"] for c in candles]
         bands = bb_bands(closes)
@@ -480,26 +484,28 @@ def scan_bb(client, symbols, prices=None):
             continue
         last = candles[-1]
         hi, lo = last["high"], last["low"]
-        # overbought setup: high pressing the upper band + RSI overbought
         if hi >= (upper - BB_OFFSET) and r >= RSI_OVERBOUGHT:
             overbought.append(f"{s}(RSI{r:.0f})")
-        # oversold setup: low pressing the lower band + RSI oversold
         if lo <= (lower + BB_OFFSET) and r <= RSI_OVERSOLD:
             oversold.append(f"{s}(RSI{r:.0f})")
         time.sleep(0.3)
     return {"overbought": overbought, "oversold": oversold}
 
 
-def _vol_label():
-    v = MIN_AVG_VOL
+def _vol_label(v=None):
+    if v is None:
+        v = MIN_AVG_VOL
     return f"{v/1e6:g}M" if v >= 1e6 else f"{v/1e3:g}K"
 
 
-def format_bb(res):
-    lines = [f"== BB band-touch + RSI "
+def format_bb(res, timeframe="daily", min_vol=None):
+    if min_vol is None:
+        min_vol = MIN_AVG_VOL
+    tf = "daily" if timeframe == "daily" else "weekly"
+    lines = [f"== {tf.capitalize()} BB band-touch + RSI "
              f"(BB {BB_WINDOW}/{BB_STD:g}sd, offset ${BB_OFFSET:g}, "
              f"RSI{RSI_PERIOD} OB>={RSI_OVERBOUGHT:g}/OS<={RSI_OVERSOLD:g}, "
-             f"{VOL_WINDOW}d avg vol > {_vol_label()}) =="]
+             f"{VOL_WINDOW}-bar avg vol > {_vol_label(min_vol)}) =="]
     if res["overbought"]:
         lines.append(f"Overbought (high near upper band) "
                      f"({len(res['overbought'])}): "
@@ -660,13 +666,16 @@ def run_all(client, symbols, which=("1", "2", "3", "4")):
     if any(x in which for x in ("1", "2", "3")):
         prices = get_live_prices(client, symbols)
     if "1" in which:
-        blocks.append(format_bb(scan_bb(client, symbols, prices)))
+        blocks.append(format_bb(scan_bb(client, symbols, prices,
+                                        timeframe="daily")))
     if "2" in which:
         blocks.append(format_patterns(
             scan_patterns(client, symbols, "daily", prices), "daily"))
     if "3" in which:
-        blocks.append(format_patterns(
-            scan_patterns(client, symbols, "weekly", prices), "weekly"))
+        blocks.append(format_bb(
+            scan_bb(client, symbols, prices, timeframe="weekly",
+                    min_vol=MIN_AVG_VOL_WEEKLY),
+            timeframe="weekly", min_vol=MIN_AVG_VOL_WEEKLY))
     if "4" in which:
         blocks.append(format_sepa(scan_sepa(client, symbols),
                                   include_near_miss=False))
@@ -772,9 +781,9 @@ def deliver(subject, report):
 # ---------------------------------------------------------------- menu
 MENU = """
 ========= Schwab Scanner =========
-  1. Bollinger Band breakouts (daily)
+  1. Daily BB band-touch + RSI
   2. Daily candlestick patterns
-  3. Weekly candlestick patterns
+  3. Weekly BB band-touch + RSI (vol > 5M)
   4. Minervini Trend Template (SEPA)
   5. Run ALL (1 + 2 + 3 + 4)
   6. SMA20 approaching from below (intraday)
@@ -790,7 +799,10 @@ def run_choice(choice, client, symbols):
     elif choice == "2":
         run_pattern_scan(client, symbols, "daily")
     elif choice == "3":
-        run_pattern_scan(client, symbols, "weekly")
+        print("\n" + format_bb(
+            scan_bb(client, symbols, None, timeframe="weekly",
+                    min_vol=MIN_AVG_VOL_WEEKLY),
+            timeframe="weekly", min_vol=MIN_AVG_VOL_WEEKLY))
     elif choice == "4":
         run_sepa_scan(client, symbols)
     elif choice == "5":
