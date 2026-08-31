@@ -77,7 +77,8 @@ Defaults shown; set in .env to change. Affects scans 1/2/3:
     MIN_AVG_VOL=1000000    # min avg volume gate for daily scans (1,2)
     MIN_AVG_VOL_WEEKLY=5000000  # min avg volume gate for weekly scan (3)
     VOL_WINDOW=30          # lookback for the avg-volume gate
-    MIN_PRICE=30           # min price ($); applies to scans 1,2,3,6,7 (not SEPA)
+    MIN_PRICE=30           # min price ($); applies to scans 1,2,3,6,7 AND SEPA
+    RS_MIN=90              # SEPA: required RS Rating floor (1-99), Minervini pref 90
 
 ### SMA-proximity scan tuning (optional)
 Options 6/7 use these; defaults shown. Set in .env to change:

@@ -48,6 +48,7 @@ RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
 RSI_OVERBOUGHT = float(os.getenv("RSI_OVERBOUGHT", "70"))
 RSI_OVERSOLD = float(os.getenv("RSI_OVERSOLD", "30"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "30"))
+RS_MIN = float(os.getenv("RS_MIN", "90"))  # SEPA RS Rating floor (1-99)
 
 # SMA20-proximity scan (options 6/7) -- configurable via .env
 SMA_PROX_PERIOD = int(os.getenv("SMA_PROX_PERIOD", "20"))
@@ -388,13 +389,14 @@ def minervini_check(closes, highs, lows, rs_rating=None):
     c["price_within_25pct_52w_high"] = (
         hi_52w is not None and price >= hi_52w * 0.75)
 
-    # RS rating: 70+ required. If not supplied, don't fail on it -- flag it.
+    # RS rating: now REQUIRED and must be >= RS_MIN. A stock with no rating
+    # (insufficient history) fails rather than passing on the other criteria.
     if rs_rating is None:
-        c["rs_rating_70plus"] = None
+        c["rs_rating_min"] = False
     else:
-        c["rs_rating_70plus"] = rs_rating >= 70
+        c["rs_rating_min"] = rs_rating >= RS_MIN
 
-    # Pass = all hard criteria true. RS counts only if provided.
+    # Pass = all hard criteria true (RS now always counts).
     hard = [v for k, v in c.items() if v is not None]
     passed = all(hard)
 
@@ -603,8 +605,9 @@ def format_sma20(res):
 
 
 def scan_sepa(client, symbols):
-    """Minervini Trend Template (SEPA). Only the 8 template criteria decide
-    pass/fail -- no volume or other filter."""
+    """Minervini Trend Template (SEPA). The 8 template criteria decide
+    pass/fail; RS Rating is required (>= RS_MIN). A min-price gate
+    (>= MIN_PRICE) drops thin/low-priced names. No volume gate."""
     print("Computing RS ratings across universe (needs 1 full pass)...")
     rs = compute_rs_ratings(client, symbols)
     passed, near_miss = [], []
@@ -613,6 +616,8 @@ def scan_sepa(client, symbols):
         closes = [c["close"] for c in candles]
         highs = [c["high"] for c in candles]
         lows = [c["low"] for c in candles]
+        if closes and closes[-1] < MIN_PRICE:   # min-price gate
+            continue
         ok, crit = minervini_check(closes, highs, lows, rs.get(s))
         if crit.get("insufficient_history"):
             continue
