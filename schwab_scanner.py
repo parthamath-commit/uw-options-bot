@@ -818,32 +818,85 @@ def run_choice(choice, client, symbols):
         print("Invalid choice.")
 
 
+def _is_market_day(d=None):
+    """True on Mon-Fri (weekday). Note: does not account for US market
+    holidays; add a holiday check here if you want holidays skipped."""
+    import datetime as _dt
+    d = d or _dt.date.today()
+    return d.weekday() < 5
+
+
+def load_sp500_symbols():
+    try:
+        import build_universe
+        syms = build_universe.load_sp500()
+        if syms:
+            return syms
+    except Exception as e:
+        print(f"S&P 500 load failed ({e}); falling back to full universe.")
+    return load_universe()
+
+
 def main():
     client = build_client()
-    symbols = load_universe()
-    print(f"Universe: {len(symbols)} symbols loaded.")
-
     args = [a.strip() for a in sys.argv[1:]]
 
-    # Non-interactive scheduler modes:
-    #   --report-daily   -> scans 1,2,4      (Mon-Thu after close)
-    #   --report-weekly  -> scans 1,2,3,4    (Friday after close)
-    #   --report-330     -> scans 6,7        (weekdays 3:30pm ET, intraday)
     import datetime as _dt
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z")
+
+    # ---- non-interactive scheduler modes ----
+    # --report-330  : 3:30pm Mon-Fri, scans 1,6,7, S&P 500 only
+    # --report-close: 6:00pm Mon-Fri, scans 1,2,  S&P 500 only
+    # --report-weekend: Saturday, scan 3 (S&P 500) + scan 4 (whole universe)
     if "--report-330" in args:
-        report = run_all(client, symbols, ("6", "7"))
-        deliver(f"[Scanner] 3:30pm SMA20 proximity -- {stamp}", report)
-        return
-    if "--email-daily" in args or "--report-daily" in args:
-        report = run_all(client, symbols, ("1", "2", "4"))
-        deliver(f"[Scanner] Daily results 1,2,4 -- {stamp}", report)
-        return
-    if "--email-weekly" in args or "--report-weekly" in args:
-        report = run_all(client, symbols, ("1", "2", "3", "4"))
-        deliver(f"[Scanner] Friday results 1,2,3,4 -- {stamp}", report)
+        if not _is_market_day():
+            print("Not a market day; skipping 3:30 report.")
+            return
+        syms = load_sp500_symbols()
+        print(f"S&P 500 universe: {len(syms)} symbols.")
+        report = run_all(client, syms, ("1", "6", "7"))
+        deliver(f"[Scanner] 3:30pm S&P500 (1,6,7) -- {stamp}", report)
         return
 
+    if "--report-close" in args:
+        if not _is_market_day():
+            print("Not a market day; skipping 6pm report.")
+            return
+        syms = load_sp500_symbols()
+        print(f"S&P 500 universe: {len(syms)} symbols.")
+        report = run_all(client, syms, ("1", "2"))
+        deliver(f"[Scanner] 6pm close S&P500 (1,2) -- {stamp}", report)
+        return
+
+    if "--report-weekend" in args:
+        # scan 3 on S&P 500, scan 4 on the whole universe -- two blocks,
+        # one delivered report.
+        sp = load_sp500_symbols()
+        full = load_universe()
+        print(f"S&P 500: {len(sp)} symbols; full universe: {len(full)} symbols.")
+        block3 = run_all(client, sp, ("3",))
+        block4 = run_all(client, full, ("4",))
+        deliver(f"[Scanner] Weekend: wk BB+RSI (S&P500) + SEPA (all) -- {stamp}",
+                block3 + "\n\n" + block4)
+        return
+
+    # legacy aliases kept working
+    if "--report-daily" in args:
+        syms = load_sp500_symbols()
+        report = run_all(client, syms, ("1", "2"))
+        deliver(f"[Scanner] Close S&P500 (1,2) -- {stamp}", report)
+        return
+    if "--report-weekly" in args:
+        sp = load_sp500_symbols(); full = load_universe()
+        block3 = run_all(client, sp, ("3",))
+        block4 = run_all(client, full, ("4",))
+        deliver(f"[Scanner] Weekend (3 S&P500 + 4 all) -- {stamp}",
+                block3 + "\n\n" + block4)
+        return
+
+    # ---- interactive / ad-hoc single scan ----
+    symbols = load_universe()
+    print(f"Universe: {len(symbols)} symbols loaded.")
     if args:
         run_choice(args[0], client, symbols)
         return

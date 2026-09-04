@@ -36,6 +36,7 @@ SP500_CSV_FALLBACK = ("https://raw.githubusercontent.com/datasets/"
                       "s-and-p-500-companies/main/data/constituents.csv")
 
 OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbols.txt")
+SP500_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500.txt")
 
 BAD_NAME_BITS = (
     " ETF", " ETN", "PREFERRED", " WARRANT", " WARRANTS", " RIGHT", " RIGHTS",
@@ -130,7 +131,7 @@ def build(force=False):
     symbols.txt and never re-fetches -- so mid-week scans are fast and the
     universe is stable between Saturday rebuilds. If no file exists yet, it
     builds once regardless so the first run isn't empty."""
-    if not force and os.path.exists(OUT_PATH):
+    if not force and os.path.exists(OUT_PATH) and os.path.exists(SP500_PATH):
         with open(OUT_PATH) as f:
             cached = [ln.strip() for ln in f if ln.strip()]
         if cached:
@@ -150,12 +151,29 @@ def build(force=False):
     sp = {s for s in sp if not looks_noncommon_symbol(s.replace(".", ""))}
     print(f"  kept {len(sp)}")
 
+    # write the S&P 500 list on its own (used by the S&P-only scan runs)
+    if sp:
+        with open(SP500_PATH, "w") as f:
+            f.write("\n".join(sorted(sp)) + "\n")
+        print(f"Wrote {SP500_PATH} with {len(sp)} S&P 500 tickers.")
+
     universe = sorted(set(nas) | sp)
     with open(OUT_PATH, "w") as f:
         f.write("\n".join(universe) + "\n")
     print(f"\nWrote {OUT_PATH} with {len(universe)} unique tickers "
           f"(NASDAQ-listed + S&P 500).")
     return universe
+
+
+def load_sp500():
+    """Return the S&P 500 tickers from sp500.txt (built alongside symbols.txt).
+    If the file is missing, trigger a build to create it."""
+    if not os.path.exists(SP500_PATH):
+        build(force=True)
+    if os.path.exists(SP500_PATH):
+        with open(SP500_PATH) as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    return []
 
 
 def main():

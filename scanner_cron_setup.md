@@ -42,20 +42,20 @@ Make it executable:
 ## Crontab (America/New_York)
 Edit with: crontab -e   then add:
 
-    # Saturday 08:00 ET -> rebuild the ticker universe for the coming week
+    # Saturday 08:00 ET -> rebuild ticker universe (also writes sp500.txt)
     0 8 * * 6     cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
-    # Mon-Fri 15:30 ET -> intraday SMA20 proximity (scans 6,7)
+    # Mon-Fri 15:30 ET -> intraday, S&P 500 only (scans 1,6,7)
     30 15 * * 1-5 /home/ubuntu/uw-options-bot/run_email.sh --report-330
-    # Mon-Thu 18:00 ET -> daily report (scans 1,2,4)
-    0 18 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
-    # Friday 18:00 ET -> weekly report (scans 1,2,3,4)
-    0 18 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --report-weekly
+    # Mon-Fri 18:00 ET -> after close, S&P 500 only (scans 1,2)
+    0 18 * * 1-5  /home/ubuntu/uw-options-bot/run_email.sh --report-close
+    # Saturday 09:00 ET -> weekend: scan 3 (S&P 500) + scan 4 (whole universe)
+    0 9 * * 6     /home/ubuntu/uw-options-bot/run_email.sh --report-weekend
 
 ## Crontab (if VM stays on UTC) -- EDT (summer). Add 1 hour in winter (EST).
     0 12 * * 6    cd /home/ubuntu/uw-options-bot && venv/bin/python3 build_universe.py --force >> universe_build.log 2>&1
     30 19 * * 1-5 /home/ubuntu/uw-options-bot/run_email.sh --report-330
-    0 22 * * 1-4  /home/ubuntu/uw-options-bot/run_email.sh --report-daily
-    0 22 * * 5    /home/ubuntu/uw-options-bot/run_email.sh --report-weekly
+    0 22 * * 1-5  /home/ubuntu/uw-options-bot/run_email.sh --report-close
+    0 13 * * 6    /home/ubuntu/uw-options-bot/run_email.sh --report-weekend
 
 ## Delivery channel
 
