@@ -70,7 +70,7 @@ into <=4000-char chunks. This is the default -- nothing to configure.
 Defaults shown; set in .env to change. Affects scans 1/2/3:
     BB_WINDOW=20           # Bollinger SMA period
     BB_STD=2               # standard deviations for the bands
-    BB_OFFSET=2            # $ proximity of daily high/low to a band (scan 1)
+    BB_OFFSET=0.5          # $ proximity of high/low to a band (scans 1,3)
     RSI_PERIOD=14          # RSI lookback (scan 1)
     RSI_OVERBOUGHT=70      # RSI overbought level (scan 1)
     RSI_OVERSOLD=30        # RSI oversold level (scan 1)

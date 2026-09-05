@@ -43,7 +43,7 @@ MIN_AVG_VOL_WEEKLY = float(os.getenv("MIN_AVG_VOL_WEEKLY", "5000000"))
 VOL_WINDOW = int(os.getenv("VOL_WINDOW", "30"))
 BB_WINDOW = int(os.getenv("BB_WINDOW", "20"))
 BB_STD = float(os.getenv("BB_STD", "2"))
-BB_OFFSET = float(os.getenv("BB_OFFSET", "2"))
+BB_OFFSET = float(os.getenv("BB_OFFSET", "0.5"))
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
 RSI_OVERBOUGHT = float(os.getenv("RSI_OVERBOUGHT", "70"))
 RSI_OVERSOLD = float(os.getenv("RSI_OVERSOLD", "30"))
@@ -198,6 +198,31 @@ def get_live_prices(client, symbols, batch=200):
             print(f"  ! quotes batch {i}-{i+len(chunk)}: {e}")
         time.sleep(0.3)
     return prices
+
+
+def get_live_quotes(client, symbols, batch=200):
+    """Like get_live_prices but returns {symbol: {"last": px, "open": op}} so
+    the SMA scans can test today's forming open. Missing fields come back None."""
+    out = {}
+    for i in range(0, len(symbols), batch):
+        chunk = symbols[i:i + batch]
+        try:
+            resp = client.get_quotes(chunk)
+            resp.raise_for_status()
+            data = resp.json()
+            for sym, q in data.items():
+                qd = q.get("quote", q) if isinstance(q, dict) else {}
+                last = (qd.get("lastPrice") or qd.get("mark")
+                        or qd.get("closePrice"))
+                op = qd.get("openPrice")
+                out[sym.upper()] = {
+                    "last": float(last) if last else None,
+                    "open": float(op) if op else None,
+                }
+        except Exception as e:
+            print(f"  ! quotes batch {i}-{i+len(chunk)}: {e}")
+        time.sleep(0.3)
+    return out
 
 
 def avg_volume(candles, window=VOL_WINDOW):
@@ -461,11 +486,11 @@ def _price_ok(symbol, candles, prices):
 
 
 def scan_bb(client, symbols, prices=None, timeframe="daily", min_vol=None):
-    """BB band-touch + RSI screener. Gates: price >= MIN_PRICE, VOL_WINDOW
-    avg vol > min_vol (defaults to MIN_AVG_VOL). Two setups on the latest
-    candle of `timeframe` (offset = BB_OFFSET):
-      overbought: HIGH >= upper band - offset AND RSI >= RSI_OVERBOUGHT
-      oversold:   LOW  <= lower band + offset AND RSI <= RSI_OVERSOLD
+    """BB band-touch + candle color. Gates: price >= MIN_PRICE, VOL_WINDOW
+    avg vol > min_vol. Two setups on the latest candle (offset = BB_OFFSET):
+      overbought: HIGH >= upper band - offset AND red candle (close < open)
+      oversold:   LOW  <= lower band + offset AND green candle (close > open)
+    Dojis (close == open) match neither.
     """
     if min_vol is None:
         min_vol = MIN_AVG_VOL
@@ -481,15 +506,15 @@ def scan_bb(client, symbols, prices=None, timeframe="daily", min_vol=None):
         if bands is None:
             continue
         upper, mid, lower = bands
-        r = rsi(closes)
-        if r is None:
-            continue
         last = candles[-1]
         hi, lo = last["high"], last["low"]
-        if hi >= (upper - BB_OFFSET) and r >= RSI_OVERBOUGHT:
-            overbought.append(f"{s}(RSI{r:.0f})")
-        if lo <= (lower + BB_OFFSET) and r <= RSI_OVERSOLD:
-            oversold.append(f"{s}(RSI{r:.0f})")
+        o, cl = last["open"], last["close"]
+        is_red = cl < o
+        is_green = cl > o
+        if hi >= (upper - BB_OFFSET) and is_red:
+            overbought.append(s)
+        if lo <= (lower + BB_OFFSET) and is_green:
+            oversold.append(s)
         time.sleep(0.3)
     return {"overbought": overbought, "oversold": oversold}
 
@@ -501,20 +526,13 @@ def _vol_label(v=None):
 
 
 def format_bb(res, timeframe="daily", min_vol=None):
-    if min_vol is None:
-        min_vol = MIN_AVG_VOL
-    tf = "daily" if timeframe == "daily" else "weekly"
-    lines = [f"== {tf.capitalize()} BB band-touch + RSI "
-             f"(BB {BB_WINDOW}/{BB_STD:g}sd, offset ${BB_OFFSET:g}, "
-             f"RSI{RSI_PERIOD} OB>={RSI_OVERBOUGHT:g}/OS<={RSI_OVERSOLD:g}, "
-             f"{VOL_WINDOW}-bar avg vol > {_vol_label(min_vol)}) =="]
+    tf = "Daily" if timeframe == "daily" else "Weekly"
+    lines = [f"== {tf} BB band-touch =="]
     if res["overbought"]:
-        lines.append(f"Overbought (high near upper band) "
-                     f"({len(res['overbought'])}): "
+        lines.append(f"Overbought ({len(res['overbought'])}): "
                      f"{', '.join(res['overbought'])}")
     if res["oversold"]:
-        lines.append(f"Oversold (low near lower band) "
-                     f"({len(res['oversold'])}): "
+        lines.append(f"Oversold ({len(res['oversold'])}): "
                      f"{', '.join(res['oversold'])}")
     if not res["overbought"] and not res["oversold"]:
         lines.append("(no hits)")
@@ -541,9 +559,7 @@ def scan_patterns(client, symbols, timeframe, prices=None):
 
 
 def format_patterns(lists, timeframe):
-    extra = ", last-3-day volume shrinking" if timeframe == "daily" else ""
-    lines = [f"== {timeframe.capitalize()} candlestick patterns "
-             f"({VOL_WINDOW}d avg vol > {_vol_label()}{extra}) =="]
+    lines = [f"== {timeframe.capitalize()} candlestick patterns =="]
     any_hit = False
     for p in PATTERNS:
         if lists[p]:
@@ -555,19 +571,23 @@ def format_patterns(lists, timeframe):
 
 
 def scan_sma20_proximity(client, symbols):
-    """Intraday SMA-proximity scans, run ~3:30pm ET (market open).
-      (a) approaching from below: sma - BAND < live_price <= sma,
-          AND the last 3 COMPLETED daily closes were all < sma.
-      (b) just above:            sma < live_price < sma + BAND.
-    SMA uses the last SMA_PROX_PERIOD completed daily closes; current price is
-    the live quote. Period and band are set by SMA_PROX_PERIOD / SMA_PROX_BAND
-    in .env (defaults 20 and 2)."""
-    period, band = SMA_PROX_PERIOD, SMA_PROX_BAND
-    live = get_live_prices(client, symbols)
-    below_approach, just_above = [], []
+    """Intraday SMA cross setups, run ~3:30pm ET (market open). SMA uses the
+    last SMA_PROX_PERIOD completed daily closes; live price and today's open
+    come from the live quote.
+      (6) live price >= SMA AND today's open < SMA AND last 3 completed daily
+          closes were all < SMA   (crossing up through the SMA today)
+      (7) live price <= SMA AND today's open > SMA AND last 3 completed daily
+          closes were all > SMA   (crossing down through the SMA today)
+    """
+    period = SMA_PROX_PERIOD
+    quotes = get_live_quotes(client, symbols)
+    cross_up, cross_down = [], []
     for s in symbols:
-        px = live.get(s)
-        if px is None:
+        q = quotes.get(s)
+        if not q:
+            continue
+        px, op = q.get("last"), q.get("open")
+        if px is None or op is None:
             continue
         if px < MIN_PRICE:            # min-price gate (live quote)
             continue
@@ -576,30 +596,29 @@ def scan_sma20_proximity(client, symbols):
         if len(closes) < period:
             continue
         sma = float(np.mean(closes[-period:]))  # last N completed closes
-        # (a) approaching from below + last 3 completed closes below sma
-        last3_below = len(closes) >= 3 and all(c < sma for c in closes[-3:])
-        if last3_below and (sma - band) < px <= sma:
-            below_approach.append(f"{s}({px:.2f}/{sma:.2f})")
-        # (b) just above sma
-        if sma < px < (sma + band):
-            just_above.append(f"{s}({px:.2f}/{sma:.2f})")
+        last3 = closes[-3:] if len(closes) >= 3 else []
+        # (6) crossing up: below-SMA history + open below + now at/above
+        if (px >= sma and op < sma and len(last3) == 3
+                and all(c < sma for c in last3)):
+            cross_up.append(s)
+        # (7) crossing down: above-SMA history + open above + now at/below
+        if (px <= sma and op > sma and len(last3) == 3
+                and all(c > sma for c in last3)):
+            cross_down.append(s)
         time.sleep(0.3)
-    return {"below_approach": below_approach, "just_above": just_above}
+    return {"cross_up": cross_up, "cross_down": cross_down}
 
 
 def format_sma20(res):
-    p, b = SMA_PROX_PERIOD, SMA_PROX_BAND
-    lines = [f"== SMA{p} proximity (intraday, live price / SMA{p}, "
-             f"band ${b:g}) =="]
-    if res["below_approach"]:
-        lines.append(f"(a) approaching from below, 3d<SMA{p} "
-                     f"({len(res['below_approach'])}): "
-                     f"{', '.join(res['below_approach'])}")
-    if res["just_above"]:
-        lines.append(f"(b) just above SMA{p} (<+${b:g}) "
-                     f"({len(res['just_above'])}): "
-                     f"{', '.join(res['just_above'])}")
-    if not res["below_approach"] and not res["just_above"]:
+    p = SMA_PROX_PERIOD
+    lines = [f"== SMA{p} cross (intraday) =="]
+    if res["cross_up"]:
+        lines.append(f"(6) crossing up ({len(res['cross_up'])}): "
+                     f"{', '.join(res['cross_up'])}")
+    if res["cross_down"]:
+        lines.append(f"(7) crossing down ({len(res['cross_down'])}): "
+                     f"{', '.join(res['cross_down'])}")
+    if not res["cross_up"] and not res["cross_down"]:
         lines.append("(no hits)")
     return "\n".join(lines)
 
@@ -635,17 +654,13 @@ def format_sepa(res, include_near_miss=True):
     lines = ["== Minervini Trend Template / SEPA =="]
     passed = res["passed"]
     if passed:
-        lines.append(f"PASSED ({len(passed)}):")
-        for s, r, crit in passed:
-            tag = " *" if crit.get("_sma200_trending_up_5mo") else ""
-            lines.append(f"  {s}  RS={r if r is not None else 'n/a'}{tag}")
+        syms = [s for s, r, crit in passed]
+        lines.append(f"PASSED ({len(syms)}): {', '.join(syms)}")
     else:
         lines.append("PASSED (0)")
     if include_near_miss and res["near_miss"]:
-        lines.append(f"\nNEAR MISSES ({len(res['near_miss'])}):")
-        for s, r, fails in res["near_miss"]:
-            lines.append(f"  {s}  RS={r if r is not None else 'n/a'}  "
-                         f"failed: {', '.join(fails)}")
+        nm = [s for s, r, fails in res["near_miss"]]
+        lines.append(f"NEAR MISSES ({len(nm)}): {', '.join(nm)}")
     return "\n".join(lines)
 
 
@@ -688,9 +703,9 @@ def run_all(client, symbols, which=("1", "2", "3", "4")):
         # both SMA sub-scans share one live-quote pass (gate applied inside)
         res = scan_sma20_proximity(client, symbols)
         if "7" in which and "6" not in which:
-            res = {"below_approach": [], "just_above": res["just_above"]}
+            res = {"cross_up": [], "cross_down": res["cross_down"]}
         if "6" in which and "7" not in which:
-            res = {"below_approach": res["below_approach"], "just_above": []}
+            res = {"cross_up": res["cross_up"], "cross_down": []}
         blocks.append(format_sma20(res))
     return "\n\n".join(blocks)
 
@@ -786,13 +801,13 @@ def deliver(subject, report):
 # ---------------------------------------------------------------- menu
 MENU = """
 ========= Schwab Scanner =========
-  1. Daily BB band-touch + RSI
+  1. Daily BB band-touch + candle color
   2. Daily candlestick patterns
-  3. Weekly BB band-touch + RSI (vol > 5M)
+  3. Weekly BB band-touch + candle color (vol > 5M)
   4. Minervini Trend Template (SEPA)
   5. Run ALL (1 + 2 + 3 + 4)
-  6. SMA20 approaching from below (intraday)
-  7. SMA20 just above (intraday)
+  6. SMA20 cross up (intraday)
+  7. SMA20 cross down (intraday)
   0. Exit
 ==================================
 Choose: """
