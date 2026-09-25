@@ -1,0 +1,9 @@
+[Unit]
+Description=Backstop stop for Barchart Pro Bot (16:40 ET weekdays)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:40:00 America/New_York
+Unit=barchartbot-stop.service
+
+[Install]
+WantedBy=timers.target

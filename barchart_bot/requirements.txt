@@ -1,0 +1,9 @@
+selenium>=4.20
+pandas
+numpy
+pytz
+yfinance
+python-dotenv
+openpyxl
+requests
+schwab-py

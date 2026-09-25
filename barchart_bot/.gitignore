@@ -1,0 +1,15 @@
+# secrets / tokens
+.env
+env
+schwab_token*.json
+*details*.txt
+# runtime data (lives only on the machine running the bot)
+signals.xlsx*
+investment_signals.xlsx
+downloads/
+archive/
+debug/
+images/
+chrome_profile*/
+venv/
+*.log

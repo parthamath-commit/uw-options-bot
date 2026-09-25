@@ -1,0 +1,20 @@
+[Unit]
+Description=Barchart Pro Bot (headless Chrome + Selenium)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/uw-options-bot/barchart_bot
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/ubuntu
+ExecStart=/home/ubuntu/uw-options-bot/barchart_bot/venv/bin/python barchart_pro_bot.py
+# Bot exits cleanly (code 0) at 20:00 ET; the timer starts it again next weekday.
+Restart=on-failure
+RestartSec=120
+KillMode=control-group
+TimeoutStopSec=30
+Nice=5

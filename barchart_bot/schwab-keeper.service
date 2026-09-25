@@ -1,0 +1,16 @@
+[Unit]
+Description=Schwab token keeper (hourly check + Telegram-assisted 7-day renewal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/uw-options-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/uw-options-bot/venv/bin/python schwab_token_keeper.py
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Backstop: stop Barchart Pro Bot after the 16:30 ET window
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop barchartbot.service

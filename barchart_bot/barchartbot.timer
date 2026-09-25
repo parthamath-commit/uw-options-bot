@@ -1,0 +1,10 @@
+[Unit]
+Description=Start Barchart Pro Bot at 09:00 ET on weekdays (bot exits itself on NYSE holidays)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:00:00 America/New_York
+Persistent=true
+Unit=barchartbot.service
+
+[Install]
+WantedBy=timers.target
