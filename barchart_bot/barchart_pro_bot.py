@@ -1566,6 +1566,11 @@ def save_debug(driver, name):
         path = os.path.join(CONFIG["debug_folder"], f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
         driver.save_screenshot(path)
         print("Debug screenshot saved:", path)
+        try:
+            with open(path[:-4] + ".html", "w", encoding="utf-8") as _f:
+                _f.write(driver.page_source)
+        except Exception:
+            pass
     except Exception as e:
         print("Debug screenshot failed:", e)
 
@@ -2243,6 +2248,7 @@ class LazyDriver:
         if self._driver is None:
             print("[chrome] starting browser...")
             self._driver = setup_driver()
+            ensure_logged_in(self._driver)
         return self._driver
 
     def __getattr__(self, name):
@@ -2360,48 +2366,137 @@ def js_click(driver, element):
     driver.execute_script("arguments[0].click();", element)
 
 
-def handle_login_popup(driver):
-    try:
-        password_fields = driver.find_elements(By.XPATH, "//input[@type='password']")
-        if not password_fields:
-            return True
+BARCHART_LOGIN_URL = "https://www.barchart.com/login"
 
-        email = os.getenv("BARCHART_EMAIL")
-        password = os.getenv("BARCHART_PASSWORD")
 
-        email_box = None
-        password_box = None
-
-        for e in driver.find_elements(By.XPATH, "//input[@type='text' or @type='email']"):
+def _visible(elements):
+    for e in elements:
+        try:
             if e.is_displayed():
-                email_box = e
-                break
+                return e
+        except Exception:
+            continue
+    return None
 
-        for p in password_fields:
-            if p.is_displayed():
-                password_box = p
-                break
 
-        if email_box is None or password_box is None:
-            save_debug(driver, "visible_login_fields_not_found")
-            return False
+def _type_into(driver, element, value):
+    """Real keystrokes (Barchart's form ignores JS-only value changes)."""
+    try:
+        element.click()
+    except Exception:
+        pass
+    try:
+        element.clear()
+    except Exception:
+        pass
+    try:
+        element.send_keys(value)
+    except Exception:
+        js_set_value(driver, element, value)
 
-        js_set_value(driver, email_box, email)
-        js_set_value(driver, password_box, password)
 
-        time.sleep(1)
-
-        login_buttons = driver.find_elements(By.XPATH, "//button[contains(text(),'Login') or contains(text(),'Log In')]")
-
-        for btn in login_buttons:
-            if btn.is_displayed():
-                js_click(driver, btn)
-                time.sleep(10)
-                return True
-
-        save_debug(driver, "login_button_not_found")
+def is_barchart_logged_in(driver):
+    """Logged in => a logout/account link exists; logged out => a visible Login link."""
+    try:
+        if driver.find_elements(By.XPATH, "//a[contains(@href,'logout')]"):
+            return True
+        login_links = driver.find_elements(
+            By.XPATH, "//a[contains(@href,'/login') or normalize-space(translate(text(),'LOGIN','login'))='login']")
+        return _visible(login_links) is None and bool(driver.find_elements(By.XPATH, "//body"))
+    except Exception:
         return False
 
+
+def _fill_login_form(driver):
+    """Fill + submit whichever Barchart login form is visible (page or popup)."""
+    email = os.getenv("BARCHART_EMAIL")
+    password = os.getenv("BARCHART_PASSWORD")
+    if not email or not password:
+        print("[login] BARCHART_EMAIL / BARCHART_PASSWORD missing in .env")
+        return False
+
+    password_box = _visible(driver.find_elements(By.XPATH, "//input[@type='password']"))
+    if password_box is None:
+        return False
+
+    # Email box must be in the SAME form/panel as the password -- never the site search box.
+    email_box = None
+    for xp in [
+        "./ancestor::form[1]//input[@type='email' or @type='text']",
+        "./ancestor::div[.//input[@type='email' or @type='text']][1]//input[@type='email' or @type='text']",
+    ]:
+        email_box = _visible(password_box.find_elements(By.XPATH, xp))
+        if email_box is not None:
+            break
+    if email_box is None:
+        email_box = _visible(driver.find_elements(
+            By.XPATH, "//input[@type='email' or contains(translate(@placeholder,'EMAIL','email'),'email') "
+                      "or contains(translate(@name,'EMAIL','email'),'email')]"))
+    if email_box is None:
+        save_debug(driver, "login_email_field_not_found")
+        return False
+
+    _type_into(driver, email_box, email)
+    _type_into(driver, password_box, password)
+    time.sleep(1)
+
+    btn = None
+    for xp in [
+        "./ancestor::form[1]//button[@type='submit']",
+        "./ancestor::form[1]//button[contains(translate(normalize-space(.),'LOGIN ','login'),'login')]",
+    ]:
+        btn = _visible(password_box.find_elements(By.XPATH, xp))
+        if btn is not None:
+            break
+    if btn is None:
+        btn = _visible(driver.find_elements(
+            By.XPATH, "//button[contains(translate(normalize-space(.),'LOGIN ','login'),'login')]"))
+    if btn is None:
+        from selenium.webdriver.common.keys import Keys
+        password_box.send_keys(Keys.RETURN)
+    else:
+        try:
+            btn.click()
+        except Exception:
+            js_click(driver, btn)
+    time.sleep(10)
+    return True
+
+
+def ensure_logged_in(driver):
+    """Log in on the dedicated login page if the session is not already logged in."""
+    try:
+        if "barchart.com" not in (driver.current_url or ""):
+            driver.get(CONFIG["barchart_unusual_url"])
+            time.sleep(CONFIG["page_load_wait_seconds"])
+        if is_barchart_logged_in(driver):
+            print("[login] Barchart session active.")
+            return True
+        print("[login] Not logged in -- logging in to Barchart...")
+        driver.get(BARCHART_LOGIN_URL)
+        time.sleep(CONFIG["page_load_wait_seconds"])
+        _fill_login_form(driver)
+        driver.get(CONFIG["barchart_unusual_url"])
+        time.sleep(CONFIG["page_load_wait_seconds"])
+        if is_barchart_logged_in(driver):
+            print("[login] Barchart login OK.")
+            return True
+        print("[login] Barchart login FAILED -- see debug/login_failed_*.png")
+        save_debug(driver, "login_failed")
+        return False
+    except Exception as e:
+        print("[login] error:", e)
+        save_debug(driver, "login_error")
+        return False
+
+
+def handle_login_popup(driver):
+    """If a login form/popup is showing, fill it in. Returns True if nothing blocks us."""
+    try:
+        if _visible(driver.find_elements(By.XPATH, "//input[@type='password']")) is None:
+            return True
+        print("[login] Login popup detected -- logging in...")
+        return _fill_login_form(driver)
     except Exception as e:
         print("Login popup handling error:", e)
         save_debug(driver, "login_popup_error")
@@ -2535,6 +2630,17 @@ def _download_page_csv_once(driver, url, label):
         print(f"Could not find {label} download button.")
         save_debug(driver, f"{label}_download_failed")
         return None
+
+    # Download button opened the "Membership Feature" login popup -> log in and retry once.
+    time.sleep(3)
+    if _visible(driver.find_elements(By.XPATH, "//input[@type='password']")) is not None:
+        print(f"[login] {label}: download asked for login -- logging in and retrying.")
+        handle_login_popup(driver)
+        driver.get(url)
+        time.sleep(CONFIG["page_load_wait_seconds"])
+        if not click_download_button(driver):
+            save_debug(driver, f"{label}_download_failed_after_login")
+            return None
 
     latest_file = wait_for_new_csv(old_file)
 
@@ -8806,9 +8912,8 @@ if __name__ == "__main__":
             _d = LazyDriver()
             _ok = False
             try:
-                _d.get(CONFIG["barchart_unusual_url"])
-                time.sleep(CONFIG["page_load_wait_seconds"])
-                handle_login_popup(_d)
+                _logged = ensure_logged_in(_d)
+                print("TEST login:", "OK" if _logged else "FAILED")
                 _f = download_unusual_options_csv(_d)
                 if _f:
                     try:
