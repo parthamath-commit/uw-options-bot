@@ -120,9 +120,31 @@ def fetch_actions(ticker, since):
     return out
 
 
+_ALPACA_SEEN = None
+
+
+def already_sent_by_alpaca(a):
+    """Skip calls the real-time Alpaca/Benzinga stream already reported (last 3 days)."""
+    global _ALPACA_SEEN
+    if _ALPACA_SEEN is None:
+        _ALPACA_SEEN = []
+        try:
+            cut = (datetime.now(ET_TZ) - timedelta(days=3)).strftime("%Y-%m-%d")
+            with open(os.path.join(ROOT, "news_watcher", "news_log.csv"), newline="") as f:
+                _ALPACA_SEEN = [(r["symbols"].upper().split(), r["headline"].lower())
+                                for r in csv.DictReader(f)
+                                if r.get("kind") == "analyst" and r.get("received_at", "") >= cut]
+        except Exception:
+            pass
+    firm = a["firm"].lower().split()[0] if a["firm"] else ""
+    return any(a["ticker"] in syms and firm and firm in head for syms, head in _ALPACA_SEEN)
+
+
 def keep(a):
     """Reputable firm + (bullish/bearish initiation, or any upgrade/downgrade)."""
     if not reputable(a["firm"]):
+        return False
+    if already_sent_by_alpaca(a):
         return False
     if a["action"] == "init":
         return rating_class(a["to"]) in ("buy", "sell")

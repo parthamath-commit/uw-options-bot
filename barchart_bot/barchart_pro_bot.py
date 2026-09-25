@@ -7372,8 +7372,25 @@ def get_yfinance_company_news(ticker):
         return []
 
 
+def get_alpaca_local_news(ticker):
+    """Real-time Benzinga headlines collected by news_watcher/alpaca_news.py (last 48h)."""
+    try:
+        path = os.path.join(os.path.dirname(BOT_HOME), "news_watcher", "recent_news.json")
+        if not os.path.exists(path):
+            return []
+        data = json.load(open(path))
+        return [{"title": x.get("title", ""), "summary": x.get("summary", ""),
+                 "source": "Benzinga (Alpaca)", "url": x.get("url", ""),
+                 "published_at": x.get("published", "")}
+                for x in reversed(data.get(str(ticker).upper(), []))]
+    except Exception as e:
+        print(f"[alpaca-news] read error: {e}")
+        return []
+
+
 def get_news_runner_news(ticker):
     items = []
+    items.extend(get_alpaca_local_news(ticker))   # real-time first
     items.extend(get_finnhub_company_news(ticker))
     items.extend(get_newsapi_company_news(ticker))
     items.extend(get_alphavantage_company_news(ticker))
