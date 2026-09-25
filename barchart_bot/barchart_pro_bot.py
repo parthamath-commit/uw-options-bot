@@ -2228,6 +2228,14 @@ def setup_driver():
         })
     except Exception as e:
         print("setDownloadBehavior failed (ignored):", e)
+    try:
+        driver.execute_cdp_cmd("Browser.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": CONFIG["download_folder"],
+            "eventsEnabled": False,
+        })
+    except Exception as e:
+        print("Browser.setDownloadBehavior failed (ignored):", e)
 
     return driver
 
@@ -2396,15 +2404,29 @@ def _type_into(driver, element, value):
 
 
 def is_barchart_logged_in(driver):
-    """Logged in => a logout/account link exists; logged out => a visible Login link."""
+    """Logged out => header shows a 'Login' link. Logged in => 'My Account' / 'Hi, <name>'."""
     try:
-        if driver.find_elements(By.XPATH, "//a[contains(@href,'logout')]"):
-            return True
-        login_links = driver.find_elements(
-            By.XPATH, "//a[contains(@href,'/login') or normalize-space(translate(text(),'LOGIN','login'))='login']")
-        return _visible(login_links) is None and bool(driver.find_elements(By.XPATH, "//body"))
+        login_link = _visible(driver.find_elements(
+            By.XPATH, "//a[translate(normalize-space(.),'LOGIN','login')='login' "
+                      "or translate(normalize-space(.),'LOGIN ','login')='log in']"))
+        if login_link is not None:
+            return False
+        account = _visible(driver.find_elements(
+            By.XPATH, "//*[self::a or self::button or self::span]"
+                      "[contains(normalize-space(.),'My Account') or starts-with(normalize-space(.),'Hi,')]"))
+        return account is not None or bool(driver.find_elements(By.XPATH, "//a[contains(@href,'logout')]"))
     except Exception:
         return False
+
+
+def barchart_download_limit(driver):
+    """Daily CSV download allowance of the logged-in account (Free=1, Plus=10, Premier=250)."""
+    try:
+        import re as _re
+        m = _re.search(r'"limits":\{"downloads":(\d+)', driver.page_source)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
 
 
 def _fill_login_form(driver):
@@ -2649,6 +2671,16 @@ def _download_page_csv_once(driver, url, label):
         return latest_file
 
     print(f"{label} download failed.")
+    # Diagnostics: what is in the download folder, and is a dialog showing?
+    try:
+        print("[diag] download folder:", os.listdir(CONFIG["download_folder"]))
+        for el in driver.find_elements(By.XPATH, "//*[contains(@class,'modal') or contains(@class,'reveal') "
+                                                 "or contains(@class,'dialog') or @role='dialog']"):
+            if el.is_displayed() and el.text.strip():
+                print("[diag] visible dialog:", " | ".join(el.text.split())[:400])
+                break
+    except Exception as e:
+        print("[diag] error:", e)
     save_debug(driver, f"{label}_download_timeout")
     return None
 
@@ -8914,6 +8946,12 @@ if __name__ == "__main__":
             try:
                 _logged = ensure_logged_in(_d)
                 print("TEST login:", "OK" if _logged else "FAILED")
+                _lim = barchart_download_limit(_d)
+                print("TEST Barchart membership download limit per day:", _lim,
+                      "(Premier=250, Plus=10, Free=1)")
+                if _lim is not None and _lim < 250:
+                    print("WARNING: account is not Barchart Premier -- the bot needs Premier "
+                          "(Options Flow page + ~100 CSV downloads/day).")
                 _f = download_unusual_options_csv(_d)
                 if _f:
                     try:
