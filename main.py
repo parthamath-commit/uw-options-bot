@@ -49,6 +49,21 @@ def run_loop():
 
     ET = ZoneInfo("America/New_York")
 
+    # ── Gate: UW API kill switch ─────────────────────────────────────────────
+    # With UW_API_ENABLED=false the UW scan loop does not run at all. We idle
+    # instead of exiting so systemd (uwbot.service) does not restart-loop.
+    # Overbought/oversold + other Schwab scans run separately via cron
+    # (run_email.sh -> schwab_scanner.py) and are unaffected.
+    from config import cfg as _cfg
+    if not _cfg.UW_API_ENABLED:
+        log.warning("UW_API_ENABLED=false -- UW scan loop disabled; idling. "
+                    "Set UW_API_ENABLED=true in .env and restart uwbot.service to resume.")
+        try:
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            sys.exit(0)
+
     # ── NYSE holiday calendar (self-contained, no extra deps) ──────────────
     def _easter_sunday(year):
         # Meeus/Jones/Butcher Gregorian algorithm

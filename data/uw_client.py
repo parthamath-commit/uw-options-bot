@@ -47,7 +47,10 @@ _STRUCTURE_MAP = {
 class UWClient:
 
     def __init__(self):
-        if not cfg.UW_API_KEY:
+        if not cfg.UW_API_ENABLED:
+            log.warning("UW API disabled (UW_API_ENABLED=false) -- UWClient will make "
+                        "no network calls; every request returns empty.")
+        elif not cfg.UW_API_KEY:
             raise ValueError(
                 "UW_API_KEY not set in .env\n"
                 "Subscribe at: https://unusualwhales.com/pricing?product=api"
@@ -81,6 +84,10 @@ class UWClient:
         Daily reset: 8 PM Eastern (America/New_York).
         """
         import time
+        if not cfg.UW_API_ENABLED:
+            # Kill switch: never hit the network while the subscription is off.
+            log.debug("UW API disabled -- skipped {}".format(path))
+            return {}
         url = cfg.UW_BASE + path
         try:
             r = self._session.get(url, params=params, timeout=12)

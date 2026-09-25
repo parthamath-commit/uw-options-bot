@@ -47,6 +47,13 @@ log = logging.getLogger("UWBot")
 class Config:
 
     # ── Unusual Whales ───────────────────────────────────────────────────────
+    # Master switch for ALL Unusual Whales API traffic. Subscription paused
+    # Sep 2026 -> default OFF. Set UW_API_ENABLED=true in .env to turn it back on.
+    # When false: the scan loop (uwbot.service) idles without calling UW, and
+    # UWClient._get() short-circuits to {} so no request can leave the VM.
+    # Schwab-based scans (schwab_scanner.py: overbought/oversold, SEPA, etc.)
+    # do not use UW and keep running from cron regardless of this flag.
+    UW_API_ENABLED: bool = os.getenv("UW_API_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
     UW_API_KEY: str   = os.getenv("UW_API_KEY", "")
     UW_BASE: str      = "https://api.unusualwhales.com"
 
