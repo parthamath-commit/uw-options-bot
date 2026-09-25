@@ -103,4 +103,6 @@ sleep 3
 systemctl --no-pager status barchartbot.service | head -6 || true
 systemctl --no-pager status schwab-keeper.service | head -4 || true
 systemctl --no-pager list-timers 'barchartbot*' | head -4
+bash "$BOT/install_housekeeping.sh"
+bash "$BOT/install_eval.sh"
 echo "Logs: journalctl -u barchartbot -f"

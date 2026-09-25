@@ -13,3 +13,7 @@ images/
 chrome_profile*/
 venv/
 *.log
+candidate_log.csv
+evaluation.csv
+evaluation_report.txt
+shadow_outcomes.csv

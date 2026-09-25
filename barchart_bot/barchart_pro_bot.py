@@ -24,6 +24,8 @@ import sys
 # /home/ubuntu/uw-options-bot/barchart_bot on the Oracle VM). Override with BOT_HOME.
 BOT_HOME = os.getenv("BOT_HOME") or os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BOT_HOME, ".env"))
+# v18: version-controlled accuracy tuning overrides .env (secrets stay in .env)
+load_dotenv(os.path.join(BOT_HOME, "tuning.env"), override=True)
 BOT_HOME = os.getenv("BOT_HOME") or BOT_HOME
 IS_LINUX = sys.platform.startswith("linux")
 # Headless Chrome on the VM (no screen); visible window on Windows unless overridden.
@@ -32,9 +34,25 @@ HEADLESS = os.getenv("HEADLESS", "true" if IS_LINUX else "false").lower() == "tr
 BLOCK_AD_HOSTS = os.getenv("BLOCK_AD_HOSTS", "true" if IS_LINUX else "false").lower() == "true"
 DISABLE_IMAGES = os.getenv("DISABLE_IMAGES", "true" if IS_LINUX else "false").lower() == "true"
 
-SCRIPT_VERSION = "v17.6.0_vm_headless"
+SCRIPT_VERSION = "v18.0_side_aware_gated"
 
 CONFIG = {
+    # =========================
+    # v18 side-aware + accuracy gates (see tuning.env)
+    # =========================
+    "require_buy_side_for_signal": os.getenv("REQUIRE_BUY_SIDE_FOR_SIGNAL", "true").lower() == "true",
+    "side_buy_threshold": float(os.getenv("SIDE_BUY_THRESHOLD", "0.75")),
+    "side_sell_threshold": float(os.getenv("SIDE_SELL_THRESHOLD", "0.25")),
+    "exclude_multi_leg_flow": os.getenv("EXCLUDE_MULTI_LEG_FLOW", "true").lower() == "true",
+    "enable_put_signals": os.getenv("ENABLE_PUT_SIGNALS", "false").lower() == "true",
+    "require_price_reaction_for_trade": os.getenv("REQUIRE_PRICE_REACTION_FOR_TRADE", "true").lower() == "true",
+    "require_daily_trend_alignment": os.getenv("REQUIRE_DAILY_TREND_ALIGNMENT", "true").lower() == "true",
+    "hard_option_time_window": os.getenv("HARD_OPTION_TIME_WINDOW", "true").lower() == "true",
+    "block_max_dte_lottery": int(os.getenv("BLOCK_MAX_DTE_LOTTERY", "1")),
+    "block_min_delta": float(os.getenv("BLOCK_MIN_DELTA", "0.15")),
+    "one_alert_per_ticker_direction_day": os.getenv("ONE_ALERT_PER_TICKER_DIRECTION_DAY", "true").lower() == "true",
+    "candidate_log_file": os.path.join(BOT_HOME, "candidate_log.csv"),
+
     "barchart_unusual_url": "https://www.barchart.com/options/unusual-activity/stocks",
     "barchart_flow_url": "https://www.barchart.com/options/options-flow",
     "barchart_option_chain_url_template": "https://www.barchart.com/stocks/quotes/{ticker}/options",
@@ -2191,6 +2209,8 @@ def setup_driver():
         chrome_options.add_argument("--disable-renderer-backgrounding")
         chrome_options.add_argument("--renderer-process-limit=2")
         chrome_options.add_argument("--mute-audio")
+        chrome_options.add_argument("--disk-cache-size=52428800")   # 50 MB cap
+        chrome_options.add_argument("--media-cache-size=10485760")
     else:
         chrome_options.add_argument("--start-maximized")
         chrome_options.add_experimental_option("detach", True)
@@ -3878,6 +3898,67 @@ def option_entry_from_flow(row):
     return 0.0
 
 
+MULTI_LEG_PREFIXES = ("ML", "MF", "ME")
+STOCK_TIED_PREFIXES = ("TL", "TE", "TA", "TF")
+
+
+def classify_trade_side(bid, ask, trade, side_text=""):
+    """
+    v18: aggressor side of an option print (quote rule with bands).
+    BUY  = trade at/near the ask -> buyer initiated
+    SELL = trade at/near the bid -> seller initiated
+    UNKNOWN = mid-spread (negotiated/crossed; direction not inferable)
+    Barchart's own Side column ('ask'/'bid') wins when present.
+    """
+    side_text = str(side_text or "").strip().lower()
+    pos = None
+    try:
+        if bid is not None and ask is not None and trade and ask > bid > 0:
+            pos = round((trade - bid) / (ask - bid), 3)
+    except Exception:
+        pos = None
+    if side_text == "ask":
+        return "BUY", pos
+    if side_text == "bid":
+        return "SELL", pos
+    if pos is not None:
+        if pos >= CONFIG.get("side_buy_threshold", 0.75):
+            return "BUY", pos
+        if pos <= CONFIG.get("side_sell_threshold", 0.25):
+            return "SELL", pos
+    return "UNKNOWN", pos
+
+
+def classify_leg_type(code):
+    code = str(code or "").upper().strip()
+    if code.startswith(MULTI_LEG_PREFIXES):
+        return "MULTI_LEG"
+    if code.startswith(STOCK_TIED_PREFIXES):
+        return "STOCK_TIED"
+    return "SINGLE"
+
+
+def side_aware_direction(option_type, aggressor):
+    """Bought call / sold put = BULLISH. Bought put / sold call = BEARISH."""
+    if aggressor == "BUY":
+        return "BULLISH" if option_type == "CALL" else "BEARISH"
+    if aggressor == "SELL":
+        return "BEARISH" if option_type == "CALL" else "BULLISH"
+    return "UNKNOWN"
+
+
+def get_flow_open_flag(row):
+    for col in ["*", "Open/Close", "Opening"]:
+        try:
+            if col in row.index:
+                v = str(row[col]).strip()
+                if v and v.lower() != "nan" and v.upper() != "N/A":
+                    return v
+        except Exception:
+            pass
+    return ""
+
+
 def normalize_unusual_records(unusual_df):
     records = []
     if unusual_df is None or unusual_df.empty:
@@ -3900,6 +3981,11 @@ def normalize_unusual_records(unusual_df):
         entry = option_entry_from_unusual(row)
         dte = get_row_dte(row, "unusual")
         premium = calculate_unusual_premium(row)
+        aggressor, spread_pos = classify_trade_side(
+            clean_number(get_unusual_value(row, "bid")),
+            clean_number(get_unusual_value(row, "ask")),
+            clean_number(get_unusual_value(row, "last")),
+        )
 
         records.append({
             "source": "UNUSUAL",
@@ -3919,6 +4005,11 @@ def normalize_unusual_records(unusual_df):
             "delta": clean_number(get_unusual_value(row, "delta")),
             "iv": clean_number(get_unusual_value(row, "iv")),
             "code": "UNUSUAL",
+            "aggressor": aggressor,
+            "spread_pos": spread_pos,
+            "leg": "SINGLE",
+            "open_flag": "",
+            "side_direction": side_aware_direction(option_type, aggressor),
         })
     return records
 
@@ -3945,6 +4036,12 @@ def normalize_flow_records(flow_df):
         entry = option_entry_from_flow(row)
         dte = get_row_dte(row, "flow")
         code = get_flow_code(row)
+        aggressor, spread_pos = classify_trade_side(
+            parse_bid_ask_size_price(get_flow_value(row, "bid_x_size")),
+            parse_bid_ask_size_price(get_flow_value(row, "ask_x_size")),
+            clean_number(get_flow_value(row, "trade")),
+            get_flow_value(row, "side"),
+        )
 
         records.append({
             "source": "FLOW",
@@ -3964,6 +4061,11 @@ def normalize_flow_records(flow_df):
             "delta": clean_number(get_flow_value(row, "delta")),
             "iv": clean_number(get_flow_value(row, "iv")),
             "code": code,
+            "aggressor": aggressor,
+            "spread_pos": spread_pos,
+            "leg": classify_leg_type(code),
+            "open_flag": get_flow_open_flag(row),
+            "side_direction": side_aware_direction(option_type, aggressor),
         })
     return records
 
@@ -3985,7 +4087,16 @@ def build_ticker_institutional_bias(unusual_records, flow_records):
                 "has_flow": False,
             }
 
-        side = "call" if rec["option_type"] == "CALL" else "put"
+        # v18: bullish = bought calls + sold puts; bearish = bought puts + sold calls.
+        # Multi-leg / stock-tied prints and mid-spread flow prints carry no direction.
+        sd = rec.get("side_direction", "UNKNOWN")
+        if rec.get("leg", "SINGLE") != "SINGLE":
+            continue
+        if sd == "UNKNOWN":
+            if rec["source"] == "FLOW":
+                continue
+            sd = "BULLISH" if rec["option_type"] == "CALL" else "BEARISH"
+        side = "call" if sd == "BULLISH" else "put"
         bias[ticker][f"{side}_premium"] += rec.get("premium", 0) or 0
         bias[ticker][f"{side}_volume"] += rec.get("volume", 0) or 0
         bias[ticker][f"{side}_count"] += 1
@@ -5125,6 +5236,104 @@ def detect_opposite_leg_structure(rec, unusual_records, flow_records):
     }
 
 
+_DAILY_TREND_CACHE = {"ts": 0, "value": None}
+
+
+def get_daily_trend_regime():
+    """
+    v18: daily market trend (replaces intraday-VWAP-only regime for gating).
+    BULLISH if SPY and QQQ both close above their 20-day SMA, BEARISH if both below.
+    Cached 30 minutes.
+    """
+    now_ts = time.time()
+    if _DAILY_TREND_CACHE["value"] and now_ts - _DAILY_TREND_CACHE["ts"] < 1800:
+        return _DAILY_TREND_CACHE["value"]
+    result = {"regime": "UNKNOWN", "detail": ""}
+    try:
+        states = []
+        details = []
+        for sym in ("SPY", "QQQ"):
+            df = yf.Ticker(sym).history(period="3mo", interval="1d", auto_adjust=False)
+            if df is None or len(df) < 21:
+                raise ValueError(f"no daily data for {sym}")
+            close = float(df["Close"].iloc[-1])
+            sma20 = float(df["Close"].tail(20).mean())
+            states.append(close > sma20)
+            details.append(f"{sym} {close:.2f} vs SMA20 {sma20:.2f}")
+        if all(states):
+            result = {"regime": "BULLISH", "detail": "; ".join(details)}
+        elif not any(states):
+            result = {"regime": "BEARISH", "detail": "; ".join(details)}
+        else:
+            result = {"regime": "MIXED", "detail": "; ".join(details)}
+    except Exception as e:
+        result = {"regime": "UNKNOWN", "detail": f"daily trend unavailable: {e}"}
+    _DAILY_TREND_CACHE.update({"ts": now_ts, "value": result})
+    return result
+
+
+_CANDIDATE_LOG_KEYS = set()
+CANDIDATE_LOG_FIELDS = [
+    "logged_at", "ticker", "option_type", "direction", "strike", "expiry", "dte", "source", "code", "leg",
+    "aggressor", "spread_pos", "open_flag", "premium", "volume", "oi", "vol_oi", "delta", "iv",
+    "underlying", "entry", "score", "confirmations", "price_reaction", "price_reaction_score",
+    "tradingview", "intraday_regime_aligned", "daily_trend", "setup_type", "decision", "sent",
+    "stage", "reject_reason",
+]
+
+
+def log_candidate(rec, stage, reject_reason="", signal=None):
+    """
+    v18: append every evaluated candidate (sent, watchlist, gated, rejected) once per
+    contract per day to candidate_log.csv. evaluate_signals.py labels these later with
+    real price moves so rule changes can be measured against what actually happened.
+    """
+    try:
+        import csv as _csv
+        day = get_market_now().strftime("%Y-%m-%d")
+        key = f"{day}|{rec.get('ticker')}|{rec.get('option_type')}|{rec.get('strike')}|{rec.get('expiry')}|{rec.get('source')}"
+        path = CONFIG["candidate_log_file"]
+        if not _CANDIDATE_LOG_KEYS and os.path.exists(path):
+            try:
+                with open(path, newline="", encoding="utf-8") as f:
+                    for r in _csv.DictReader(f):
+                        if str(r.get("logged_at", "")).startswith(day):
+                            _CANDIDATE_LOG_KEYS.add(f"{day}|{r['ticker']}|{r['option_type']}|{r['strike']}|{r['expiry']}|{r['source']}")
+            except Exception:
+                pass
+            _CANDIDATE_LOG_KEYS.add("__loaded__")
+        if key in _CANDIDATE_LOG_KEYS and stage != "SENT":
+            return
+        _CANDIDATE_LOG_KEYS.add(key)
+        sig = signal or {}
+        pr = sig.get("price_reaction", {}) or {}
+        row = {
+            "logged_at": get_market_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ticker": rec.get("ticker"), "option_type": rec.get("option_type"),
+            "direction": rec.get("direction"), "strike": rec.get("strike"), "expiry": rec.get("expiry"),
+            "dte": rec.get("dte"), "source": rec.get("source"), "code": rec.get("code"), "leg": rec.get("leg"),
+            "aggressor": rec.get("aggressor"), "spread_pos": rec.get("spread_pos"), "open_flag": rec.get("open_flag"),
+            "premium": rec.get("premium"), "volume": rec.get("volume"), "oi": rec.get("oi"),
+            "vol_oi": round(rec.get("vol_oi", 0) or 0, 3), "delta": rec.get("delta"), "iv": rec.get("iv"),
+            "underlying": rec.get("price"), "entry": rec.get("entry"),
+            "score": sig.get("score", ""), "confirmations": sig.get("confirmation_count", ""),
+            "price_reaction": pr.get("confirmed", ""), "price_reaction_score": pr.get("score", ""),
+            "tradingview": pr.get("tradingview_confirmed", ""),
+            "intraday_regime_aligned": sig.get("intraday_regime_aligned", ""),
+            "daily_trend": sig.get("daily_trend", ""), "setup_type": sig.get("setup_type", ""),
+            "decision": sig.get("decision", ""), "sent": stage == "SENT",
+            "stage": stage, "reject_reason": reject_reason,
+        }
+        new = not os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=CANDIDATE_LOG_FIELDS)
+            if new:
+                w.writeheader()
+            w.writerow(row)
+    except Exception as e:
+        print(f"[candidate-log] error: {e}")
+
+
 def score_institutional_option_candidate(rec, unusual_records, flow_records, ticker_bias):
     score = 0
     reasons = []
@@ -5167,6 +5376,30 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
     if CONFIG.get("mixed_direction_no_directional_trade", True) and b.get("bias") == "MIXED_GAMMA":
         return None
 
+    # ---- v18 hard rejects (logged so their accuracy can still be measured) ----
+    if rec.get("leg", "SINGLE") != "SINGLE" and CONFIG.get("exclude_multi_leg_flow", True):
+        log_candidate(rec, "REJECT", f"{rec.get('leg')} order: direction not inferable")
+        return None
+    if CONFIG.get("require_buy_side_for_signal", True):
+        if rec["source"] == "FLOW" and rec.get("aggressor") != "BUY":
+            log_candidate(rec, "REJECT", f"flow print not buyer-initiated ({rec.get('aggressor')})")
+            return None
+        if rec["source"] == "UNUSUAL" and rec.get("aggressor") == "SELL":
+            log_candidate(rec, "REJECT", "unusual last trade at bid (seller)")
+            return None
+    if option_type == "PUT" and not CONFIG.get("enable_put_signals", False):
+        log_candidate(rec, "REJECT", "put signals disabled")
+        return None
+    if dte <= CONFIG.get("block_max_dte_lottery", 1):
+        log_candidate(rec, "REJECT", "0-1 DTE")
+        return None
+    _d = abs(rec.get("delta", 0) or 0)
+    if 0 < _d < CONFIG.get("block_min_delta", 0.15):
+        log_candidate(rec, "REJECT", "lottery delta")
+        return None
+    if b.get("bias") not in [None, "NEUTRAL", direction]:
+        log_candidate(rec, "REJECT", f"ticker bias conflict ({b.get('bias')})")
+        return None
     # Market regime alignment: CALLs prefer SPY/QQQ bullish, PUTs prefer SPY/QQQ bearish.
     market_alignment = get_option_market_regime_alignment(option_type)
     if CONFIG.get("require_market_regime_alignment", True):
@@ -5227,18 +5460,25 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
         aggressive_related_flow = True
 
     # Premium strength from screenshots: $100K minimum, $500K strong, $1M+ institutional.
-    if premium >= CONFIG["option_premium_huge"]:
-        score += 7
-        reasons.append("Institutional premium $1M+")
+    # v18: history showed $0.5M-1M prints worked best; $2M+ prints are often hedges.
+    if premium >= 2000000:
+        score += 3
+        reasons.append("Premium $2M+ (often hedging; reduced weight)")
+    elif premium >= CONFIG["option_premium_huge"]:
+        score += 4
+        reasons.append("Institutional premium $1M-2M")
     elif premium >= CONFIG["option_premium_large"]:
         score += 6
-        reasons.append("Very large premium $500K+")
+        reasons.append("Premium $500K-1M (historically strongest)")
     elif premium >= CONFIG["option_premium_medium"]:
-        score += 4
+        score += 2
         reasons.append("Premium $100K+")
     elif premium >= CONFIG["option_premium_small"]:
-        score += 2
+        score += 1
         reasons.append("Premium $50K+")
+    if rec.get("open_flag", "").lower().endswith("toopen"):
+        score += 2
+        reasons.append(f"Opening position ({rec.get('open_flag')})")
 
     # Flow code priority.
     if rec["source"] == "FLOW":
@@ -5334,8 +5574,8 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
     if structure_check.get("is_likely_structure"):
         structure_type = structure_check.get("structure_type", "structure")
         if structure_type in ("straddle", "strangle"):
-            penalty = CONFIG.get("opposite_leg_strict_penalty", -6)
-            structure_force_watchlist = True
+            log_candidate(rec, "REJECT", f"{structure_type} structure")
+            return None
         else:
             # Generic two-sided activity: softer penalty, may still trade if
             # other factors are very strong.
@@ -5550,9 +5790,29 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
     # Final clean categorization: TRADE, WATCHLIST, or IGNORE.
     # v17.1: combine all force_watchlist signals (win-rate filter and the new
     # structure detector both can demote to watchlist).
+    # ---- v18 TRADE gates: any failure keeps the candidate on the watchlist ----
+    v18_gates = []
+    if CONFIG.get("hard_option_time_window", True) and not quality_window_ok:
+        v18_gates.append("outside option time window")
+    if CONFIG.get("require_price_reaction_for_trade", True) and not price_reaction.get("confirmed"):
+        v18_gates.append("price reaction not confirmed")
+    daily_trend = get_daily_trend_regime()
+    want = "BULLISH" if direction == "BULLISH" else "BEARISH"
+    if CONFIG.get("require_daily_trend_alignment", True) and daily_trend.get("regime") != want:
+        v18_gates.append(f"daily trend {daily_trend.get('regime')} ({daily_trend.get('detail')})")
+    if score < CONFIG.get("trade_min_score", 18):
+        v18_gates.append(f"score {score} < TRADE_MIN_SCORE {CONFIG.get('trade_min_score', 18)}")
+    if not v18_gates:   # only look up earnings (slow) for otherwise-qualifying trades
+        _earn = get_earnings_risk(ticker)
+        if _earn.get("earnings_near") and clean_number(_earn.get("days_to_earnings", 999)) <= 2:
+            v18_gates.append("earnings within 2 days")
+    if v18_gates:
+        reasons.append("v18 gates: " + "; ".join(v18_gates))
+
     combined_force_watchlist = (
         win_rate_filter.get("force_watchlist", False)
         or structure_force_watchlist
+        or bool(v18_gates)
     )
     category = categorize_option_signal(
         score,
@@ -5563,6 +5823,9 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
     )
 
     if category == "IGNORE":
+        log_candidate(rec, "IGNORE", "; ".join(v18_gates) or "score/confirmations too low",
+                      {"score": score, "confirmation_count": len(confirmations), "price_reaction": price_reaction,
+                       "daily_trend": daily_trend.get("regime"), "intraday_regime_aligned": market_alignment.get("aligned")})
         return None
 
     decision = category
@@ -5631,15 +5894,25 @@ def score_institutional_option_candidate(rec, unusual_records, flow_records, tic
         "signal_key": f"OPTION_{ticker}_{rec['expiry']}_{rec['strike']}_{option_type}_{get_market_now().strftime('%Y-%m-%d')}",
     }
 
+    signal_dict["daily_trend"] = daily_trend.get("regime")
+    signal_dict["intraday_regime_aligned"] = market_alignment.get("aligned")
+    signal_dict["v18_gates"] = v18_gates
+    signal_dict["aggressor"] = rec.get("aggressor")
+    signal_dict["leg"] = rec.get("leg")
+    signal_dict["open_flag"] = rec.get("open_flag")
     signal_dict["setup_type"] = classify_setup_type(
         signal_dict, rec, cluster_stats, price_reaction,
         related_flow_premium=related_flow_premium,
     )
     reasons.append(f"Setup type: {signal_dict['setup_type']}")
+    if signal_dict["setup_type"] == "gamma_squeeze" and signal_dict["decision"] == "TRADE":
+        signal_dict["decision"] = "WATCHLIST"
+        v18_gates.append("gamma_squeeze setup")
+        reasons.append("v18: gamma_squeeze setups kept on watchlist (weak history)")
 
     # v16: Mark detection timestamp now that the candidate is fully built.
     mark_signal_detected(signal_dict["signal_key"])
-
+    log_candidate(rec, signal_dict["decision"], "; ".join(v18_gates), signal_dict)
     return signal_dict
 
 
@@ -6766,10 +7039,14 @@ def process_unusual_csv(driver, unusual_csv, flow_df):
     # TRADE signals: send to Telegram + save to Excel.
     for signal in top_trades:
         signal_key = signal["signal_key"]
-
         if signal_key in GLOBAL_ALERTED_OPTIONS or was_option_already_sent_today(signal_key):
             print(f"Duplicate institutional TRADE option skipped: {signal_key}")
             continue
+        idea_key = f"IDEA_{signal['ticker']}_{signal['direction']}_{get_market_now().strftime('%Y-%m-%d')}"
+        if CONFIG.get("one_alert_per_ticker_direction_day", True) and idea_key in GLOBAL_ALERTED_OPTIONS:
+            print(f"v18: already alerted {signal['ticker']} {signal['direction']} today -- skipped {signal_key}")
+            continue
+        GLOBAL_ALERTED_OPTIONS.add(idea_key)
 
         _attach_live_chase_context(signal)
 
@@ -6777,7 +7054,7 @@ def process_unusual_csv(driver, unusual_csv, flow_df):
             GLOBAL_ALERTED_OPTIONS.add(signal_key)
             mark_signal_sent(signal_key)
             signal["latency_seconds"] = get_signal_latency(signal_key)
-
+            log_candidate({**signal.get("_rec", {}), **{k: signal.get(k) for k in ("ticker", "option_type", "direction", "strike", "expiry", "dte", "source", "code", "premium", "volume", "oi", "vol_oi", "delta", "iv", "entry", "aggressor", "leg", "open_flag")}}, "SENT", "", signal)
         save_institutional_option_signal_to_excel(signal)
         sent_items.append(signal)
         time.sleep(1)
@@ -7339,67 +7616,63 @@ def format_runner_float(value):
     return str(value)
 
 
+def _fmt_shares(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return None
+    if n >= 1e9:
+        return f"{n/1e9:.1f}B"
+    if n >= 1e6:
+        return f"{n/1e6:.1f}M"
+    if n >= 1e3:
+        return f"{n/1e3:.0f}K"
+    return f"{n:.0f}"
+
+
 def build_news_runner_message(signal):
+    """v18: news alert written as short, complete sentences."""
     stock = signal["stock"]
     news = signal["news"]
     score = signal["score"]
-    reasons = signal["reasons"]
-    signal_type = classify_news_runner_score(score)
+    signal_type = {
+        "INSTITUTIONAL_GRADE_NEWS_RUNNER": "top grade",
+        "HIGH_CONVICTION_NEWS_RUNNER": "high conviction",
+        "WATCHLIST_NEWS_RUNNER": "watchlist",
+    }.get(classify_news_runner_score(score), "low quality")
+    t = stock["ticker"]
+    m = lambda v: f"${float(v):,.2f}"
 
-    entry = stock["day_high"]
-    stop_loss = round(stock["price"] * (1 - CONFIG["news_runner_stop_loss_pct"] / 100), 2)
-    target_1 = round(stock["price"] * (1 + CONFIG["news_runner_target_1_pct"] / 100), 2)
-    target_2 = round(stock["price"] * (1 + CONFIG["news_runner_target_2_pct"] / 100), 2)
+    price = stock["price"]
+    stop_loss = round(price * (1 - CONFIG["news_runner_stop_loss_pct"] / 100), 2)
+    target_1 = round(price * (1 + CONFIG["news_runner_target_1_pct"] / 100), 2)
+    target_2 = round(price * (1 + CONFIG["news_runner_target_2_pct"] / 100), 2)
 
-    catalysts = ", ".join(news.get("bullish_hits", [])) or "Fresh news catalyst"
-    negatives = ", ".join(news.get("negative_hits", [])) or "None"
+    headline = str(news.get("headline", "") or "").strip().rstrip(".")
+    source = str(news.get("source", "") or "").strip()
+    news_part = f'after news that "{headline}"' + (f" ({source})" if source else "") if headline else "on fresh news"
 
-    return f"""
-🧨 NEWS MOMENTUM RUNNER
+    float_txt = _fmt_shares(stock.get("float"))
+    vol_txt = _fmt_shares(stock.get("volume"))
+    vwap_txt = (f"is holding above VWAP ({m(stock['vwap'])})" if stock.get("holds_vwap")
+                else f"is trading below VWAP ({m(stock['vwap'])})")
 
-Asset Type: STOCK
-Signal Type: {signal_type}
-Ticker: {stock["ticker"]}
-Score: {score}/100
-Time: {get_market_now().strftime("%Y-%m-%d %H:%M:%S %Z")}
-
-Price: ${stock["price"]}
-Previous Close: ${stock["previous_close"]}
-Gap: {stock["gap_pct"]}%
-Volume: {stock["volume"]:,.0f}
-Avg Volume: {stock["avg_volume"]:,.0f}
-Rel Volume: {stock["rel_volume"]}x
-Float: {format_runner_float(stock.get("float"))}
-
-VWAP: {stock["vwap"]}
-VWAP Hold: {"YES" if stock["holds_vwap"] else "NO"}
-Day High: ${stock["day_high"]}
-
-Entry Plan:
-Break/hold above day high ${entry} or clean VWAP pullback hold.
-
-Stop Loss:
-${stop_loss} or below VWAP.
-
-Target 1: ${target_1}
-Target 2: ${target_2}
-
-News Source: {news.get("source", "")}
-Headline: {news.get("headline", "")}
-
-Catalyst Tags:
-{catalysts}
-
-Negative Tags:
-{negatives}
-
-Reasons:
-- {chr(10).join(reasons)}
-
-Risk Note:
-Low-float news runners can halt, reverse, and dilute quickly.
-Use small size and hard stop.
-""".strip()
+    lines = [
+        f"🧨 NEWS RUNNER: {t} ({signal_type}, score {score}/100)",
+        "",
+        f"{t} is up {float(stock['gap_pct']):.1f}% at {m(price)} {news_part}.",
+        f"Volume is {float(stock['rel_volume']):.1f}x normal ({vol_txt} shares)"
+        + (f", the float is only {float_txt} shares," if float_txt else ",")
+        + f" and the stock {vwap_txt}.",
+        f"Buy only on a break above today's high of {m(stock['day_high'])} or on a pullback that holds VWAP.",
+        f"Place the stop at {m(stop_loss)} ({CONFIG['news_runner_stop_loss_pct']:.0f}% below), "
+        f"with targets at {m(target_1)} and {m(target_2)}.",
+    ]
+    negatives = news.get("negative_hits", [])
+    if negatives:
+        lines.append(f"Caution: the news also mentions {' and '.join([', '.join(negatives[:-1]), negatives[-1]] if len(negatives) > 1 else negatives)}.")
+    lines.append("Low-float runners can halt and reverse fast, so keep the position small.")
+    return "\n".join(lines)
 
 
 def save_news_runner_to_excel(signal):
@@ -7526,37 +7799,33 @@ def scan_and_send_news_runner_signals(tickers):
 
 
 def get_news_gist(ticker):
+    """One complete sentence summarising the latest headlines (saved to Excel)."""
     try:
-        t = yf.Ticker(ticker)
-        news = getattr(t, "news", []) or []
-
-        if not news:
-            return "No fresh news found."
-
+        items = getattr(yf.Ticker(ticker), "news", []) or []
         headlines = []
-        for item in news[:3]:
-            title = item.get("title", "")
+        for item in items[:3]:
+            title = item.get("title") or (item.get("content") or {}).get("title", "")
             if title:
-                headlines.append(title)
+                headlines.append(str(title).strip().rstrip("."))
+        if not headlines:
+            return f"There is no fresh news for {ticker}."
 
-        text = " | ".join(headlines)
-
+        low = " ".join(headlines).lower()
         bullish_words = ["upgrade", "beats", "raises", "growth", "surge", "record", "partnership", "approval"]
         bearish_words = ["downgrade", "misses", "cuts", "falls", "lawsuit", "probe", "weak", "warning"]
-
-        low = text.lower()
-
         if any(w in low for w in bullish_words):
-            sentiment = "Bullish"
+            tone = "bullish"
         elif any(w in low for w in bearish_words):
-            sentiment = "Bearish"
+            tone = "bearish"
         else:
-            sentiment = "Neutral"
+            tone = "neutral"
 
-        return f"{sentiment}: {text[:350]}"
-
+        text = f'The latest news for {ticker} is {tone}: "{headlines[0]}."'
+        if len(headlines) > 1:
+            text += f' Also: "{headlines[1]}."'
+        return text[:350]
     except Exception as e:
-        return f"News unavailable: {e}"
+        return f"News for {ticker} is unavailable ({e})."
 
 
 def scan_stock(ticker):
@@ -8946,12 +9215,6 @@ if __name__ == "__main__":
             try:
                 _logged = ensure_logged_in(_d)
                 print("TEST login:", "OK" if _logged else "FAILED")
-                _lim = barchart_download_limit(_d)
-                print("TEST Barchart membership download limit per day:", _lim,
-                      "(Premier=250, Plus=10, Free=1)")
-                if _lim is not None and _lim < 250:
-                    print("WARNING: account is not Barchart Premier -- the bot needs Premier "
-                          "(Options Flow page + ~100 CSV downloads/day).")
                 _f = download_unusual_options_csv(_d)
                 if _f:
                     try:
