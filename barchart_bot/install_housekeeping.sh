@@ -43,4 +43,4 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now pal-housekeeping.timer
 echo "Housekeeping installed. Next run:"
-systemctl --no-pager list-timers pal-housekeeping.timer | head -2
+systemctl --no-pager list-timers pal-housekeeping.timer | head -2 || true

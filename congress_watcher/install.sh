@@ -52,4 +52,4 @@ WantedBy=timers.target
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now congress-watcher.timer analyst-watcher.timer
-systemctl --no-pager list-timers congress-watcher.timer analyst-watcher.timer | head -3
+systemctl --no-pager list-timers congress-watcher.timer analyst-watcher.timer | head -3 || true

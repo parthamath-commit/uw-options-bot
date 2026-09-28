@@ -23,4 +23,4 @@ WantedBy=timers.target
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now barchart-eval.timer
-systemctl --no-pager list-timers barchart-eval.timer | head -2
+systemctl --no-pager list-timers barchart-eval.timer | head -2 || true

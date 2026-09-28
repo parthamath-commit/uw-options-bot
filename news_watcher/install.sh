@@ -46,6 +46,6 @@ sudo systemctl enable alpaca-news.service
 sudo systemctl restart alpaca-news.service
 sudo systemctl enable --now sec-insider.timer
 sleep 8
-systemctl --no-pager status alpaca-news.service | head -5
+systemctl --no-pager status alpaca-news.service | head -5 || true
 journalctl -u alpaca-news -n 8 --no-pager
-systemctl --no-pager list-timers sec-insider.timer | head -2
+systemctl --no-pager list-timers sec-insider.timer | head -2 || true
