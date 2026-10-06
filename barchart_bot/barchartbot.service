@@ -12,7 +12,8 @@ WorkingDirectory=/home/ubuntu/uw-options-bot/barchart_bot
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/ubuntu
 ExecStart=/home/ubuntu/uw-options-bot/barchart_bot/venv/bin/python barchart_pro_bot.py
-# Bot exits cleanly (code 0) at 20:00 ET; the timer starts it again next weekday.
+# v18.1: bot stays up 24/7 - after 16:30 ET (and on weekends/NYSE holidays) it closes
+# Chrome and sleeps until 09:00 ET next trading day. The timer is only a safety net.
 Restart=on-failure
 RestartSec=120
 KillMode=control-group

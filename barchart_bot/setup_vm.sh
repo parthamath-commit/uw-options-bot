@@ -88,7 +88,9 @@ free -m
 echo "=== 6/6 systemd: bot (09:00-16:30 ET trading days) + Schwab token keeper ==="
 sudo cp barchartbot.service barchartbot.timer barchartbot-stop.service barchartbot-stop.timer schwab-keeper.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now barchartbot.timer barchartbot-stop.timer
+sudo systemctl enable --now barchartbot.timer
+# v18.1: bot sleeps until next open itself; the 16:40 stop backstop would kill it
+sudo systemctl disable --now barchartbot-stop.timer 2>/dev/null || true
 /home/ubuntu/uw-options-bot/venv/bin/pip install -q "schwab-py>=1.4" python-dotenv requests
 sudo systemctl enable schwab-keeper.service
 sudo systemctl restart schwab-keeper.service

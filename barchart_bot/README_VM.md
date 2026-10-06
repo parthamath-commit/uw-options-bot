@@ -8,9 +8,11 @@ Same bot as `C:\BarchartBot\barchart_pro_bot.py`, adapted for the 1 GB Oracle VM
 - Images + ad/tracker hosts blocked in Chrome; 4 GB swap as a safety net.
 - Crash recovery: a dead Chrome is restarted and the download retried once; a fatal
   error exits with code 1 and systemd restarts the bot after 2 minutes.
-- **Schedule: 09:00-16:30 ET on NYSE trading days.** `barchartbot.timer` starts it at 09:00
-  Mon-Fri; the bot exits at once on NYSE holidays and stops itself at 16:30
-  (`AFTER_HOURS_END_HOUR/MINUTE` in `.env`). `barchartbot-stop.timer` is a 16:40 backstop.
+- **Schedule: 09:00-16:30 ET on NYSE trading days.** After 16:30 (and on weekends/NYSE
+  holidays) the bot closes Chrome and *sleeps* until 09:00 ET next trading day instead of
+  exiting (v18.1; `SLEEP_UNTIL_NEXT_OPEN=true`, wake time `NEXT_OPEN_WAKE_HOUR/MINUTE` in `.env`).
+  `barchartbot.timer` (09:00 Mon-Fri) is only a safety net if the process died.
+  `barchartbot-stop.timer` must stay **disabled**, or it kills the sleeping bot at 16:40.
 - **Schwab token**: `schwab-keeper.service` (`../schwab_token_keeper.py`) checks the token
   hourly and, 24h before the 7-day expiry, sends a Telegram login link. Log in, approve,
   paste the resulting `https://127.0.0.1...` address back into Telegram within ~30s; it saves

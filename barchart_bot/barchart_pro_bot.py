@@ -34,7 +34,7 @@ HEADLESS = os.getenv("HEADLESS", "true" if IS_LINUX else "false").lower() == "tr
 BLOCK_AD_HOSTS = os.getenv("BLOCK_AD_HOSTS", "true" if IS_LINUX else "false").lower() == "true"
 DISABLE_IMAGES = os.getenv("DISABLE_IMAGES", "true" if IS_LINUX else "false").lower() == "true"
 
-SCRIPT_VERSION = "v18.0_side_aware_gated"
+SCRIPT_VERSION = "v18.1_sleep_until_open"
 
 CONFIG = {
     # =========================
@@ -2315,6 +2315,45 @@ def _idle(driver, seconds):
     except Exception:
         pass
     time.sleep(seconds)
+
+
+# v18.1: sleep overnight / over weekends+holidays instead of exiting, so the
+# process stays up and resumes by itself at the next market open.
+def next_market_wake_time(now=None):
+    """Next NYSE trading day at NEXT_OPEN_WAKE_HOUR:MINUTE ET (default 09:00)."""
+    now = now or get_market_now()
+    tz = pytz.timezone(CONFIG["market_timezone"])
+    wake_h = int(os.getenv("NEXT_OPEN_WAKE_HOUR", "9"))
+    wake_m = int(os.getenv("NEXT_OPEN_WAKE_MINUTE", "0"))
+    d = now.date()
+    for _ in range(15):
+        if d.weekday() < 5 and d not in nyse_holidays(d.year):
+            wake = tz.localize(datetime.combine(d, dt_time(wake_h, wake_m)))
+            if wake > now:
+                return wake
+        d += timedelta(days=1)
+    return now + timedelta(days=1)  # should never happen
+
+
+def sleep_until_next_open(driver, reason=""):
+    """Close Chrome and sleep (in <=30 min chunks) until the next market open."""
+    try:
+        driver.release()
+    except Exception as e:
+        print(f"[chrome] close error (ignored): {e}")
+    wake = next_market_wake_time()
+    msg = f"😴 {reason + ' ' if reason else ''}Sleeping until {wake.strftime('%a %Y-%m-%d %H:%M %Z')}."
+    print(msg)
+    try:
+        send_investment_telegram_message(msg)
+    except Exception as e:
+        print(f"[telegram] sleep notice failed (ignored): {e}")
+    while True:
+        remaining = (wake - get_market_now()).total_seconds()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 1800))
+    print(f"⏰ Woke up for market day {get_market_now().strftime('%Y-%m-%d %H:%M %Z')}.")
 
 
 def move_png_files():
@@ -9007,6 +9046,9 @@ def main():
 
         if not is_market_day():
             print(get_market_status_message())
+            if os.getenv("SLEEP_UNTIL_NEXT_OPEN", "true").lower() == "true":
+                sleep_until_next_open(driver, "Market closed today (weekend/NYSE holiday).")
+                continue
             if os.getenv("EXIT_ON_NON_MARKET_DAY", "true" if IS_LINUX else "false").lower() == "true":
                 print("Market closed today (weekend/NYSE holiday). Exiting; the timer starts the bot next trading day.")
                 driver.release()
@@ -9068,6 +9110,9 @@ def main():
             continue
 
         if now.time() > make_time("after_hours_end_hour", "after_hours_end_minute"):
+            if os.getenv("SLEEP_UNTIL_NEXT_OPEN", "true").lower() == "true":
+                sleep_until_next_open(driver, "📴 After-hours ended.")
+                continue
             print("After-hours ended. Bot stopped.")
             send_investment_telegram_message("📴 After-hours ended. Bot stopped.")
             # Close Chrome browser before exiting
