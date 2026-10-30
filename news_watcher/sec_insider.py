@@ -118,11 +118,17 @@ def money(x):
     return f"${x/1e6:.1f}M" if x >= 1e6 else f"${x/1e3:.0f}K"
 
 
+ENTITY_WORDS = {"INC", "INC.", "LLC", "LP", "L.P.", "CORP", "CORP.", "CO", "CO.", "LTD", "TRUST", "FUND",
+                "HOLDINGS", "PARTNERS", "CAPITAL", "MANAGEMENT", "GROUP", "BANK", "PLC", "SA", "AG", "NV"}
+
+
 def title_name(n):
     parts = n.split()
-    if len(parts) >= 2 and parts[0].isupper():          # SEC style "HUANG JEN HSUN"
+    is_entity = any(p.upper().strip(",") in ENTITY_WORDS for p in parts)
+    if not is_entity and len(parts) >= 2 and n.isupper():   # SEC style "HUANG JEN HSUN" -> "Jen Hsun Huang"
         parts = parts[1:] + parts[:1]
-    return " ".join(p.capitalize() for p in parts)
+    keep_upper = {"LLC", "LP", "L.P.", "PLC", "SA", "AG", "NV"}
+    return " ".join(p.upper() if p.upper() in keep_upper else p.capitalize() for p in parts)
 
 
 def summarize(doc):
@@ -134,8 +140,8 @@ def summarize(doc):
     if buys and bv >= MIN_BUY:
         sh = sum(t["shares"] for t in buys)
         avg = bv / sh if sh else 0
-        after = buys[-1]["after"]
-        stake = f", now owning {after:,.0f} shares" if after else ""
+        after = max((t["after"] or 0) for t in buys)
+        stake = f", now owning {after:,.0f} shares" if after and after >= sh else ""
         d = buys[-1]["date"]
         try:
             d = datetime.strptime(d, "%Y-%m-%d").strftime("%b %d")
